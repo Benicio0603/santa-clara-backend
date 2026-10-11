@@ -1,0 +1,19 @@
+# Dependências instaladas pelo npm
+node_modules/
+
+# Arquivos com configurações e segredos
+.env
+.env.*
+!.env.example
+
+# Arquivos de log
+*.log
+npm-debug.log*
+
+# Arquivos do sistema operacional
+.DS_Store
+Thumbs.db
+
+# Arquivos de compilação
+dist/
+build/
