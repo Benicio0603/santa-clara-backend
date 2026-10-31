@@ -177,7 +177,20 @@ app.post('/api/login', async (req, res) => {
             [email.trim().toLowerCase()]
         );
         const usuario = resultado.rows[0];
-        if (!usuario || !usuario.ativo || !(await bcrypt.compare(senha, usuario.senha_hash))) {
+        const usuario = resultado.rows[0];
+        if (!usuario || !usuario.ativo) {
+            return res.status(401).json({ erro: 'E-mail ou senha inválidos.' });
+        }
+        let senhaValida = false;
+        const hash = usuario.senha_hash || usuario.senha;
+        if (hash && hash.startsWith('$2')) {
+            senhaValida = await bcrypt.compare(senha, hash);
+        } else {
+            senhaValida = (senha === usuario.senha || senha === usuario.senha_hash);
+        }
+        if (!senhaValida) {
+            return res.status(401).json({ erro: 'E-mail ou senha inválidos.' });
+        } {
             return res.status(401).json({ erro: 'E-mail ou senha inválidos.' });
         }
         if (usuario.perfil === 'professor' && !usuario.professor_id) {
