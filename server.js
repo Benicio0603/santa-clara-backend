@@ -1406,5 +1406,10 @@ app.put('/api/responsavel/meu-perfil', autenticarToken, autorizar('responsavel')
 app.listen(PORT, async () => {
     console.log(`Servidor iniciado em http://localhost:${PORT}`);
     await garantirColunasAvisos();
-    await garantirTabelasFrequencias();
+    try {
+  await garantirTabelasFrequencias();
+  console.log('Tabelas de frequencia OK');
+} catch (e) {
+  console.log('Aviso: garantirTabelasFrequencias falhou mas servidor continua:', e.message);
+}
 });
