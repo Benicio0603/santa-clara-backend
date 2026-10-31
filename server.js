@@ -176,7 +176,7 @@ app.post('/api/login', async (req, res) => {
              FROM usuarios WHERE email = $1`,
             [email.trim().toLowerCase()]
         );
-        const usuario = resultado.rows[0];
+       
         const usuario = resultado.rows[0];
         if (!usuario || !usuario.ativo) {
             return res.status(401).json({ erro: 'E-mail ou senha inválidos.' });
@@ -189,8 +189,6 @@ app.post('/api/login', async (req, res) => {
             senhaValida = (senha === usuario.senha || senha === usuario.senha_hash);
         }
         if (!senhaValida) {
-            return res.status(401).json({ erro: 'E-mail ou senha inválidos.' });
-        } {
             return res.status(401).json({ erro: 'E-mail ou senha inválidos.' });
         }
         if (usuario.perfil === 'professor' && !usuario.professor_id) {
