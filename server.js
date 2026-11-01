@@ -175,9 +175,38 @@ app.post('/api/login', async (req, res) => {
             [email.trim().toLowerCase()]
         );
         const usuario = resultado.rows[0];
-        if (!usuario || !usuario.ativo || !(await bcrypt.compare(senha, usuario.senha_hash))) {
+        if (!usuario || !usuario.ativo) {
             return res.status(401).json({ erro: 'E-mail ou senha inválidos.' });
         }
+
+        const senhaArmazenada = usuario.senha_hash;
+        let senhaValida = false;
+        if (typeof senhaArmazenada === 'string' && /^\$2[aby]\$\d{2}\$/.test(senhaArmazenada)) {
+            senhaValida = await bcrypt.compare(senha, senhaArmazenada);
+        } else if (typeof senhaArmazenada === 'string' && senha === senhaArmazenada) {
+            const novoHash = await bcrypt.hash(senha, 10);
+            const atualizacao = await pool.query(
+                'UPDATE usuarios SET senha_hash = $1 WHERE id = $2 AND senha_hash = $3',
+                [novoHash, usuario.id, senhaArmazenada]
+            );
+            if (atualizacao.rowCount === 1) {
+                senhaValida = true;
+            } else {
+                const senhaAtual = await pool.query(
+                    'SELECT senha_hash FROM usuarios WHERE id = $1 AND ativo = TRUE',
+                    [usuario.id]
+                );
+                const hashAtual = senhaAtual.rows[0]?.senha_hash;
+                senhaValida = typeof hashAtual === 'string' &&
+                    /^\$2[aby]\$\d{2}\$/.test(hashAtual) &&
+                    await bcrypt.compare(senha, hashAtual);
+            }
+        }
+
+        if (!senhaValida) {
+            return res.status(401).json({ erro: 'E-mail ou senha inválidos.' });
+        }
+
         if (usuario.perfil === 'professor' && !usuario.professor_id) {
             return res.status(403).json({ erro: 'Este usuário ainda não está vinculado a um professor.' });
         }
