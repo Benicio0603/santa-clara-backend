@@ -176,19 +176,8 @@ app.post('/api/login', async (req, res) => {
              FROM usuarios WHERE email = $1`,
             [email.trim().toLowerCase()]
         );
-       
         const usuario = resultado.rows[0];
-        if (!usuario || !usuario.ativo) {
-            return res.status(401).json({ erro: 'E-mail ou senha inválidos.' });
-        }
-        let senhaValida = false;
-        const hash = usuario.senha_hash || usuario.senha;
-        if (hash && hash.startsWith('$2')) {
-            senhaValida = await bcrypt.compare(senha, hash);
-        } else {
-            senhaValida = (senha === usuario.senha || senha === usuario.senha_hash);
-        }
-        if (!senhaValida) {
+        if (!usuario || !usuario.ativo || !(await bcrypt.compare(senha, usuario.senha_hash))) {
             return res.status(401).json({ erro: 'E-mail ou senha inválidos.' });
         }
         if (usuario.perfil === 'professor' && !usuario.professor_id) {
@@ -1168,10 +1157,20 @@ app.get('/api/turmas-disciplinas/minhas', autenticarToken, autorizar('professor'
       const r = await pool.query(`SELECT td.id, t.nome as turma, d.nome as disciplina, t.id as turma_id, p.nome as professor FROM turmas_disciplinas td JOIN turmas t ON t.id=td.turma_id JOIN disciplinas d ON d.id=td.disciplina_id LEFT JOIN professores p ON p.id=td.professor_id ORDER BY t.nome, d.nome`);
       return res.json(r.rows);
     } else {
-      const r = await pool.query(`SELECT td.id, t.nome as turma, d.nome as disciplina, t.id as turma_id, p.nome as professor FROM turmas_disciplinas td JOIN turmas t ON t.id=td.turma_id JOIN disciplinas d ON d.id=td.disciplina_id LEFT JOIN professores p ON p.id=td.professor_id WHERE td.professor_id=$1 ORDER BY t.nome, d.nome`, [Number(req.usuario.professor_id)]);
+      const professorId = Number(req.usuario.professor_id);
+      if (!Number.isSafeInteger(professorId) || professorId <= 0) {
+        return res.status(403).json({ erro: 'Este usuário ainda não está vinculado a um professor.' });
+      }
+      const r = await pool.query(`SELECT td.id, t.nome as turma, d.nome as disciplina, t.id as turma_id, p.nome as professor FROM turmas_disciplinas td JOIN turmas t ON t.id=td.turma_id JOIN disciplinas d ON d.id=td.disciplina_id LEFT JOIN professores p ON p.id=td.professor_id WHERE td.professor_id=$1 ORDER BY t.nome, d.nome`, [professorId]);
       return res.json(r.rows);
     }
-  }catch(e){ return res.status(500).json({erro:'Erro'}); }
+  } catch (erro) {
+    console.error('Erro ao carregar turmas e disciplinas do professor:', erro.message);
+    if (erro.code === '42P01' || erro.code === '42703') {
+      return res.status(500).json({ erro: 'O banco de dados não possui todas as tabelas ou colunas necessárias para carregar as turmas. Confira a migração do banco no Render.' });
+    }
+    return res.status(500).json({ erro: 'Não foi possível carregar as turmas e disciplinas do professor.' });
+  }
 });
 app.get('/api/alunos/:id', autenticarToken, async (req, res) => {
   try {
@@ -1409,18 +1408,3 @@ app.put('/api/responsavel/meu-perfil', autenticarToken, autorizar('responsavel')
     const r = await pool.query(`SELECT r.id, u.nome, u.email, r.telefone FROM responsaveis r JOIN usuarios u ON u.id=r.usuario_id WHERE r.usuario_id=$1`, [usuarioId]);
     return res.json({ mensagem: 'Perfil atualizado com sucesso', perfil: r.rows[0] });
   } catch (e) {
-    console.error(e);
-    return res.status(500).json({ erro: 'Erro ao atualizar perfil' });
-  }
-});
-
-app.listen(PORT, async () => {
-    console.log(`Servidor iniciado em http://localhost:${PORT}`);
-    await garantirColunasAvisos();
-    try {
-  await garantirTabelasFrequencias();
-  console.log('Tabelas de frequencia OK');
-} catch (e) {
-  console.log('Aviso: garantirTabelasFrequencias falhou mas servidor continua:', e.message);
-}
-});
