@@ -128,7 +128,6 @@ app.use(express.static(path.join(__dirname, '..', 'frontend')));
 
 app.get('/', (req, res) => {
     const indexPath = path.join(__dirname, '..', 'frontend', 'index.html');
-    console.log('Tentando servir frontend:', indexPath, 'Existe?', fs.existsSync(indexPath));
     if (fs.existsSync(indexPath)) {
         return res.sendFile(indexPath, (err) => {
           if(err){
@@ -137,8 +136,7 @@ app.get('/', (req, res) => {
           }
         });
     }
-    console.error('index.html NÃO encontrado em', indexPath);
-    res.status(404).json({ erro: 'Frontend não encontrado', path: indexPath });
+    return res.json({ status: 'online', mensagem: 'O frontend é publicado separadamente no Netlify.' });
 });
 
 app.get('/api/saude', async (req, res) => {
@@ -1153,15 +1151,31 @@ app.post('/api/professores', autenticarToken, autorizar('admin'), async (req, re
 });
 app.get('/api/turmas-disciplinas/minhas', autenticarToken, autorizar('professor','admin'), async (req, res) => {
   try {
+    const schema = await pool.query(`
+      SELECT
+        EXISTS (
+          SELECT 1
+          FROM information_schema.columns
+          WHERE table_schema = current_schema()
+            AND table_name = 'turmas_disciplinas'
+            AND column_name = 'disciplina_id'
+        ) AS tem_disciplina_id,
+        to_regclass('disciplinas') IS NOT NULL AS tem_tabela_disciplinas
+    `);
+    const temDisciplina = schema.rows[0].tem_disciplina_id && schema.rows[0].tem_tabela_disciplinas;
+    const disciplinaSelect = temDisciplina ? 'd.nome' : "'Disciplina não vinculada'";
+    const disciplinaJoin = temDisciplina
+      ? 'JOIN disciplinas d ON d.id = td.disciplina_id'
+      : '';
     if(req.usuario.perfil==='admin'){
-      const r = await pool.query(`SELECT td.id, t.nome as turma, d.nome as disciplina, t.id as turma_id, p.nome as professor FROM turmas_disciplinas td JOIN turmas t ON t.id=td.turma_id JOIN disciplinas d ON d.id=td.disciplina_id LEFT JOIN professores p ON p.id=td.professor_id ORDER BY t.nome, d.nome`);
+      const r = await pool.query(`SELECT td.id, t.nome as turma, ${disciplinaSelect} as disciplina, t.id as turma_id, p.nome as professor FROM turmas_disciplinas td JOIN turmas t ON t.id=td.turma_id ${disciplinaJoin} LEFT JOIN professores p ON p.id=td.professor_id ORDER BY t.nome, disciplina`);
       return res.json(r.rows);
     } else {
       const professorId = Number(req.usuario.professor_id);
       if (!Number.isSafeInteger(professorId) || professorId <= 0) {
         return res.status(403).json({ erro: 'Este usuário ainda não está vinculado a um professor.' });
       }
-      const r = await pool.query(`SELECT td.id, t.nome as turma, d.nome as disciplina, t.id as turma_id, p.nome as professor FROM turmas_disciplinas td JOIN turmas t ON t.id=td.turma_id JOIN disciplinas d ON d.id=td.disciplina_id LEFT JOIN professores p ON p.id=td.professor_id WHERE td.professor_id=$1 ORDER BY t.nome, d.nome`, [professorId]);
+      const r = await pool.query(`SELECT td.id, t.nome as turma, ${disciplinaSelect} as disciplina, t.id as turma_id, p.nome as professor FROM turmas_disciplinas td JOIN turmas t ON t.id=td.turma_id ${disciplinaJoin} LEFT JOIN professores p ON p.id=td.professor_id WHERE td.professor_id=$1 ORDER BY t.nome, disciplina`, [professorId]);
       return res.json(r.rows);
     }
   } catch (erro) {
