@@ -1207,6 +1207,61 @@ async function garantirColunasAvisos() {
   console.log('✅ Coluna parentesco verificada/criada');
 }
 
+async function garantirTabelaProfessores() {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS professores (
+        id BIGSERIAL PRIMARY KEY,
+        nome VARCHAR(150) NOT NULL,
+        email VARCHAR(180),
+        ativo BOOLEAN NOT NULL DEFAULT TRUE,
+        criado_em TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await client.query(`
+      INSERT INTO professores (id, nome)
+      OVERRIDING SYSTEM VALUE
+      SELECT DISTINCT ON (professor_id)
+             professor_id,
+             COALESCE(NULLIF(BTRIM(nome), ''), 'Professor ' || professor_id)
+      FROM usuarios
+      WHERE perfil = 'professor' AND professor_id IS NOT NULL AND professor_id > 0
+      ORDER BY professor_id, id
+      ON CONFLICT (id) DO NOTHING
+    `);
+
+    const sequence = await client.query(
+      "SELECT pg_get_serial_sequence('professores', 'id') AS nome"
+    );
+    if (sequence.rows[0].nome) {
+      const sequenceState = await client.query(
+        `SELECT last_value, is_called FROM ${sequence.rows[0].nome}`
+      );
+      const maxId = await client.query('SELECT COALESCE(MAX(id), 0) AS id FROM professores');
+      const currentValue = Number(sequenceState.rows[0].last_value);
+      const highestId = Number(maxId.rows[0].id);
+      if (highestId > currentValue || (!sequenceState.rows[0].is_called && highestId === currentValue)) {
+        await client.query('SELECT setval($1::regclass, $2, true)', [sequence.rows[0].nome, highestId]);
+      }
+    }
+
+    await client.query('COMMIT');
+    console.log('Tabela de professores verificada; vínculos existentes preservados.');
+  } catch (erro) {
+    try {
+      await client.query('ROLLBACK');
+    } catch (erroRollback) {
+      console.error('Erro ao cancelar a migração da tabela de professores:', erroRollback.message);
+    }
+    console.error('Erro ao preparar a tabela de professores:', erro.message);
+    throw erro;
+  } finally {
+    client.release();
+  }
+}
+
 async function garantirTabelasFrequencias() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS frequencias (
@@ -1408,3 +1463,14 @@ app.put('/api/responsavel/meu-perfil', autenticarToken, autorizar('responsavel')
     const r = await pool.query(`SELECT r.id, u.nome, u.email, r.telefone FROM responsaveis r JOIN usuarios u ON u.id=r.usuario_id WHERE r.usuario_id=$1`, [usuarioId]);
     return res.json({ mensagem: 'Perfil atualizado com sucesso', perfil: r.rows[0] });
   } catch (e) {
+    console.error(e);
+    return res.status(500).json({ erro: 'Erro ao atualizar perfil' });
+  }
+});
+
+app.listen(PORT, async () => {
+    console.log(`Servidor iniciado em http://localhost:${PORT}`);
+    await garantirColunasAvisos();
+    await garantirTabelaProfessores();
+    await garantirTabelasFrequencias();
+});
