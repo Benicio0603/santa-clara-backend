@@ -259,7 +259,13 @@ app.post('/api/turmas', autenticarToken, async (req, res) => {
 app.get('/api/alunos', autenticarToken, async (req, res) => {
     try {
         const pesquisa = (req.query.busca || '').trim();
-        const resultado = await pool.query(`SELECT id, nome, matricula, data_nascimento, ativo FROM alunos WHERE nome ILIKE $1 OR matricula ILIKE $1 ORDER BY nome`, [`%${pesquisa}%`]);
+        const resultado = await pool.query(
+            `SELECT id, nome, matricula, ativo
+             FROM alunos
+             WHERE nome ILIKE $1 OR matricula ILIKE $1
+             ORDER BY nome`,
+            [`%${pesquisa}%`]
+        );
         res.json(resultado.rows);
     } catch (erro) {
         console.error('Erro ao consultar alunos:', erro.message);
@@ -1130,13 +1136,24 @@ app.get('/api/turmas-disciplinas/todos', autenticarToken, autorizar('admin'), as
 });
 
 app.post('/api/matriculas', autenticarToken, autorizar('admin'), async (req, res) => {
-  try{
-    const { aluno_id, turma_id } = req.body||{};
-    if(!aluno_id || !turma_id) return res.status(400).json({erro:'aluno_id e turma_id obrigatórios'});
-    await pool.query('DELETE FROM matriculas WHERE aluno_id=$1', [Number(aluno_id)]);
-    const r = await pool.query('INSERT INTO matriculas (aluno_id, turma_id) VALUES ($1,$2) RETURNING id', [Number(aluno_id), Number(turma_id)]);
-    return res.status(201).json({mensagem:'Matriculado', id: r.rows[0].id});
-  }catch(e){ return res.status(500).json({erro:'Erro: '+e.message}); }
+  try {
+    const alunoId = Number(req.body?.aluno_id);
+    const turmaId = Number(req.body?.turma_id);
+    if (!Number.isSafeInteger(alunoId) || alunoId <= 0 || !Number.isSafeInteger(turmaId) || turmaId <= 0) {
+      return res.status(400).json({ erro: 'Selecione um aluno e uma turma válidos.' });
+    }
+    const resultado = await pool.query(
+      `INSERT INTO matriculas (aluno_id, turma_id)
+       VALUES ($1, $2)
+       ON CONFLICT (aluno_id) DO UPDATE SET turma_id = EXCLUDED.turma_id
+       RETURNING id`,
+      [alunoId, turmaId]
+    );
+    return res.status(201).json({ mensagem: 'Matrícula atualizada com sucesso.', id: resultado.rows[0].id });
+  } catch (erro) {
+    console.error('Erro ao matricular aluno:', erro.message);
+    return res.status(500).json({ erro: 'Não foi possível matricular o aluno.' });
+  }
 });
 
 app.get('/api/matriculas', autenticarToken, autorizar('admin'), async (req, res) => {
