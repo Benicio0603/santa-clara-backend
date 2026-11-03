@@ -529,10 +529,17 @@ app.post('/api/responsaveis', autenticarToken, autorizar('admin'), async (req, r
     const { nome, email, senha, telefone, alunos_ids, parentesco } = req.body || {};
     if (!nome || !email || !senha) return res.status(400).json({ erro: 'Nome, email e senha são obrigatórios.' });
     if (senha.length < 8) return res.status(400).json({ erro: 'Senha deve ter pelo menos 8 caracteres.' });
+    let telefoneNormalizado = null;
+    if (telefone !== undefined && telefone !== null && String(telefone).trim()) {
+      telefoneNormalizado = String(telefone).replace(/\D/g, '');
+      if (telefoneNormalizado.startsWith('0')) telefoneNormalizado = telefoneNormalizado.slice(1);
+      if (telefoneNormalizado.length === 10 || telefoneNormalizado.length === 11) telefoneNormalizado = `55${telefoneNormalizado}`;
+      if (!/^55\d{10,11}$/.test(telefoneNormalizado)) return res.status(400).json({ erro: 'Telefone inválido. Informe DDD e número com WhatsApp.' });
+    }
     await client.query('BEGIN');
     const hash = await bcrypt.hash(senha, 12);
     const user = await client.query(`INSERT INTO usuarios (nome, email, senha_hash, perfil) VALUES ($1,$2,$3,'responsavel') RETURNING id`, [nome.trim(), email.trim().toLowerCase(), hash]);
-    const resp = await client.query(`INSERT INTO responsaveis (usuario_id, telefone, parentesco) VALUES ($1,$2,$3) RETURNING id`, [user.rows[0].id, telefone || null, parentesco || 'responsável']);
+    const resp = await client.query(`INSERT INTO responsaveis (usuario_id, telefone, parentesco) VALUES ($1,$2,$3) RETURNING id`, [user.rows[0].id, telefoneNormalizado, parentesco || 'responsável']);
     if (Array.isArray(alunos_ids)) {
       for (const alunoId of alunos_ids) {
         const idNum = Number(alunoId);
@@ -812,37 +819,48 @@ app.get('/api/faltas/turmas/:turmaDisciplinaId/alunos', autenticarToken, autoriz
     if (!dataIsoValida(data)) return res.status(400).json({ erro: 'Informe uma data válida.' });
 
     const parametrosTurma = [turmaDisciplinaId];
-    let filtroProfessor = '';
     if (req.usuario.perfil === 'professor') {
       if (!req.usuario.professor_id) return res.status(403).json({ erro: 'Usuário sem vínculo com um professor.' });
       parametrosTurma.push(Number(req.usuario.professor_id));
-      filtroProfessor = 'AND td.professor_id = $3';
     }
-    const turma = await pool.query(
+
+    const turmaResult = await pool.query(
       `SELECT turma_id FROM turmas_disciplinas td WHERE td.id = $1 ${req.usuario.perfil === 'professor' ? 'AND td.professor_id = $2' : ''}`,
       parametrosTurma
     );
-    if (turma.rowCount === 0) return res.status(403).json({ erro: 'Turma/disciplina não encontrada ou sem permissão.' });
 
-    const parametros = [turmaDisciplinaId, data];
-    if (req.usuario.perfil === 'professor') parametros.push(Number(req.usuario.professor_id));
-    const resultado = await pool.query(
-      `SELECT DISTINCT a.id, a.nome, f.id AS frequencia_id, f.presente, f.detalhes
-       FROM turmas_disciplinas td
-       JOIN matriculas m ON m.turma_id = td.turma_id
-       JOIN alunos a ON a.id = m.aluno_id AND a.ativo = TRUE
-       LEFT JOIN frequencias f
-         ON f.aluno_id = a.id
-        AND f.turma_disciplina_id = td.id
-        AND f.data = $2
-       WHERE td.id = $1 ${filtroProfessor}
+    if (turmaResult.rowCount === 0) return res.status(403).json({ erro: 'Turma/disciplina não encontrada ou sem permissão.' });
+
+    const turmaId = turmaResult.rows[0].turma_id;
+
+    // ✅ CORREÇÃO: DISTINCT e SEM JOIN que triplicava
+    const alunosResult = await pool.query(
+      `SELECT DISTINCT a.id, a.nome, a.turma_id,
+              COALESCE((
+                SELECT json_agg(json_build_object('nome', contatos.nome, 'telefone', contatos.telefone))
+                FROM (
+                  SELECT DISTINCT r.id, u.nome, r.telefone
+                  FROM (
+                    SELECT responsavel_id FROM responsavel_aluno WHERE aluno_id = a.id
+                    UNION
+                    SELECT responsavel_id FROM alunos_responsaveis WHERE aluno_id = a.id
+                  ) vinculos
+                  JOIN responsaveis r ON r.id = vinculos.responsavel_id
+                  JOIN usuarios u ON u.id = r.usuario_id
+                  WHERE u.ativo = TRUE
+                ) contatos
+              ), '[]'::json) AS responsaveis
+       FROM alunos a
+       WHERE a.turma_id = $1
        ORDER BY a.nome`,
-      parametros
+      [turmaId]
     );
-    return res.json(resultado.rows);
-  } catch (erro) {
-    console.error('Erro ao consultar alunos para chamada:', erro.message);
-    return res.status(500).json({ erro: 'Não foi possível consultar os alunos da turma.' });
+
+    res.json(alunosResult.rows);
+
+  } catch (err) {
+    console.error('Erro faltas/turmas/alunos:', err);
+    res.status(500).json({ erro: 'Erro ao buscar alunos' });
   }
 });
 
@@ -1457,14 +1475,14 @@ app.put('/api/responsaveis/:id', autenticarToken, autorizar('admin'), async (req
     if (!Number.isSafeInteger(id) || id <= 0) return res.status(400).json({ erro: 'ID inválido' });
 
     // normaliza telefone
-    let telNorm = null;
+    let telNorm;
     if (telefone !== undefined) {
       if (telefone === '' || telefone === null) telNorm = null;
       else {
         let n = String(telefone).replace(/\D/g,'');
         if (n.startsWith('0')) n = n.slice(1);
         if (n.length === 11) n = '55'+n;
-        if (n.length < 10) return res.status(400).json({ erro: 'Telefone inválido. Use DDD + número' });
+        if (!/^55\d{10,11}$/.test(n)) return res.status(400).json({ erro: 'Telefone inválido. Use DDD + número' });
         telNorm = n;
       }
     }
@@ -1472,7 +1490,7 @@ app.put('/api/responsaveis/:id', autenticarToken, autorizar('admin'), async (req
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      if (telNorm !== null || parentesco !== undefined) {
+      if (telefone !== undefined || parentesco !== undefined) {
         let set = [];
         let params = [];
         let idx = 1;
