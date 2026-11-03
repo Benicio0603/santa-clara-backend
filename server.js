@@ -1267,6 +1267,11 @@ async function garantirColunasAvisos() {
   console.log('✅ Coluna parentesco verificada/criada');
 }
 
+async function garantirColunasAlunos() {
+  await pool.query('ALTER TABLE alunos ADD COLUMN IF NOT EXISTS data_nascimento DATE');
+  console.log('Coluna alunos.data_nascimento verificada/criada.');
+}
+
 async function garantirTabelaProfessores() {
   const client = await pool.connect();
   try {
@@ -1531,6 +1536,7 @@ app.put('/api/responsavel/meu-perfil', autenticarToken, autorizar('responsavel')
 app.listen(PORT, async () => {
     console.log(`Servidor iniciado em http://localhost:${PORT}`);
     await garantirColunasAvisos();
+    await garantirColunasAlunos();
     await garantirTabelaProfessores();
     await garantirTabelasFrequencias();
 });
