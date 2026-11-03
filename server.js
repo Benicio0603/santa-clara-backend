@@ -1272,6 +1272,34 @@ async function garantirColunasAlunos() {
   console.log('Coluna alunos.data_nascimento verificada/criada.');
 }
 
+async function garantirResponsaveis() {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await client.query(`
+      INSERT INTO responsaveis (usuario_id, parentesco)
+      SELECT u.id, 'responsável'
+      FROM usuarios u
+      WHERE u.perfil = 'responsavel'
+        AND NOT EXISTS (
+          SELECT 1 FROM responsaveis r WHERE r.usuario_id = u.id
+        )
+    `);
+    await client.query('COMMIT');
+    console.log(`Registros de responsáveis verificados; ${result.rowCount} conta(s) regularizada(s).`);
+  } catch (erro) {
+    try {
+      await client.query('ROLLBACK');
+    } catch (erroRollback) {
+      console.error('Erro ao cancelar a migração de responsáveis:', erroRollback.message);
+    }
+    console.error('Erro ao preparar os registros de responsáveis:', erro.message);
+    throw erro;
+  } finally {
+    client.release();
+  }
+}
+
 async function garantirTabelaProfessores() {
   const client = await pool.connect();
   try {
@@ -1537,6 +1565,7 @@ app.listen(PORT, async () => {
     console.log(`Servidor iniciado em http://localhost:${PORT}`);
     await garantirColunasAvisos();
     await garantirColunasAlunos();
+    await garantirResponsaveis();
     await garantirTabelaProfessores();
     await garantirTabelasFrequencias();
 });
