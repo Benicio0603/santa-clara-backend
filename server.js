@@ -575,7 +575,7 @@ app.get('/api/responsavel/filhos', autenticarToken, autorizar('responsavel','adm
     let query = `SELECT a.id, a.nome, a.matricula, CASE WHEN a.foto_url IS NOT NULL THEN '/api/alunos/' || a.id || '/foto' END AS foto_url, t.nome as turma, t.ano_letivo FROM alunos a LEFT JOIN matriculas m ON m.aluno_id = a.id LEFT JOIN turmas t ON t.id = m.turma_id WHERE a.ativo = true`;
     let params = [];
     if (perfil === 'responsavel') {
-      query = `SELECT a.id, a.nome, a.matricula, CASE WHEN a.foto_url IS NOT NULL THEN '/api/alunos/' || a.id || '/foto' END AS foto_url, t.nome as turma, t.ano_letivo, ra.parentesco FROM responsaveis r JOIN responsavel_aluno ra ON ra.responsavel_id = r.id JOIN alunos a ON a.id = ra.aluno_id LEFT JOIN matriculas m ON m.aluno_id = a.id LEFT JOIN turmas t ON t.id = m.turma_id WHERE r.usuario_id = $1 AND a.ativo = true ORDER BY a.nome`;
+      query = `SELECT DISTINCT a.id, a.nome, a.matricula, CASE WHEN a.foto_url IS NOT NULL THEN '/api/alunos/' || a.id || '/foto' END AS foto_url, t.nome as turma, t.ano_letivo, ra.parentesco FROM responsaveis r JOIN ( SELECT responsavel_id, aluno_id, COALESCE(MAX(NULLIF(parentesco, '')), 'Responsável') AS parentesco FROM ( SELECT responsavel_id, aluno_id, parentesco FROM responsavel_aluno UNION ALL SELECT responsavel_id, aluno_id, parentesco FROM alunos_responsaveis ) links GROUP BY responsavel_id, aluno_id ) ra ON ra.responsavel_id = r.id JOIN alunos a ON a.id = ra.aluno_id LEFT JOIN matriculas m ON m.aluno_id = a.id LEFT JOIN turmas t ON t.id = m.turma_id WHERE r.usuario_id = $1 AND a.ativo = true ORDER BY a.nome`;
       params = [usuarioId];
     }
     const result = await pool.query(query, params);
@@ -1412,7 +1412,7 @@ app.delete('/api/alunos/:id/responsaveis/:responsavel_id', autenticarToken, auto
 
 app.get('/api/responsaveis/lista', autenticarToken, autorizar('admin','professor'), async (req,res)=>{
   try{
-    const result = await pool.query(`SELECT r.id, u.nome, u.email as usuario_email, r.telefone, r.parentesco FROM responsaveis r JOIN usuarios u ON u.id = r.usuario_id ORDER BY u.nome`);
+    const result = await pool.query(`SELECT r.id, u.nome, u.email as usuario_email, r.telefone, r.parentesco FROM responsaveis r JOIN usuarios u ON u.id = r.usuario_id WHERE u.ativo = true ORDER BY u.nome`);
     return res.json(result.rows);
   }catch(e){
     console.error(e);
