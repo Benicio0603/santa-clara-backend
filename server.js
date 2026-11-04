@@ -325,6 +325,12 @@ app.patch('/api/alunos/:id/inativar', autenticarToken, async (req, res) => {
 });
 
 app.delete('/api/alunos/:id', autenticarToken, autorizar('admin'), async (req, res) => {
+    if (req.body?.confirmar_exclusao_com_historico !== true) {
+        return res.status(409).json({
+            erro: 'Nenhum dado foi excluído. O administrador deve atualizar/recarregar o aplicativo e confirmar a exclusão permanente.'
+        });
+    }
+
     const id = Number(req.params.id);
     if (!Number.isSafeInteger(id) || id <= 0) return res.status(400).json({ erro: 'ID de aluno inválido.' });
 
