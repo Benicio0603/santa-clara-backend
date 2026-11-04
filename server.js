@@ -529,11 +529,14 @@ app.post('/api/responsaveis', autenticarToken, autorizar('admin'), async (req, r
     const { nome, email, senha, telefone, alunos_ids, parentesco } = req.body || {};
     if (!nome || !email || !senha) return res.status(400).json({ erro: 'Nome, email e senha são obrigatórios.' });
     if (senha.length < 8) return res.status(400).json({ erro: 'Senha deve ter pelo menos 8 caracteres.' });
-    let telefoneNormalizado = String(telefone || '').replace(/\D/g, '');
-    if (telefoneNormalizado.startsWith('0')) telefoneNormalizado = telefoneNormalizado.slice(1);
-    if (telefoneNormalizado.length === 10 || telefoneNormalizado.length === 11) telefoneNormalizado = `55${telefoneNormalizado}`;
-    if (!/^55\d{10,11}$/.test(telefoneNormalizado)) {
-      return res.status(400).json({ erro: 'Informe um celular válido com DDD para WhatsApp.' });
+    let telefoneNormalizado = null;
+    if (telefone) {
+      telefoneNormalizado = String(telefone).replace(/\D/g, '');
+      if (telefoneNormalizado.startsWith('0')) telefoneNormalizado = telefoneNormalizado.slice(1);
+      if (telefoneNormalizado.length === 10 || telefoneNormalizado.length === 11) telefoneNormalizado = `55${telefoneNormalizado}`;
+      if (!/^55\d{10,11}$/.test(telefoneNormalizado)) {
+        return res.status(400).json({ erro: 'Telefone inválido. Informe DDD e número.' });
+      }
     }
     await client.query('BEGIN');
     const hash = await bcrypt.hash(senha, 12);
