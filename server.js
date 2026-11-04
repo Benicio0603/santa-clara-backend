@@ -318,6 +318,52 @@ app.delete('/api/responsaveis/:id', autenticarToken, autorizar('admin'), async (
   } catch (e) { console.error('Erro excluir responsavel:', e); res.status(500).json({ erro: e.message }); }
 });
 
+// FALTAVA: VÍNCULOS (turma + disciplina + professor)
+app.delete('/api/turmas-disciplinas/:id', autenticarToken, autorizar('admin'), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const preservar = req.query.preservarHistorico === 'true';
+    if (!Number.isSafeInteger(id) || id <= 0) return res.status(400).json({ erro: 'ID inválido.' });
+    if (preservar) {
+      await pool.query(`UPDATE turmas_disciplinas SET ativo=false WHERE id=$1`, [id]);
+      res.json({ modo: 'arquivado', mensagem: 'Vínculo arquivado. Histórico preservado.' });
+    } else {
+      await pool.query(`DELETE FROM frequencias WHERE turma_disciplina_id=$1`, [id]);
+      await pool.query(`DELETE FROM avaliacoes WHERE turma_disciplina_id=$1`, [id]).catch(()=>{});
+      await pool.query(`DELETE FROM turmas_disciplinas WHERE id=$1`, [id]);
+      res.json({ modo: 'excluido', mensagem: 'Vínculo excluído.' });
+    }
+  } catch(e){ console.error(e); res.status(500).json({erro:e.message}); }
+});
+
+// FALTAVA: AVISOS
+app.delete('/api/avisos/:id', autenticarToken, autorizar('admin'), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id <= 0) return res.status(400).json({ erro: 'ID inválido.' });
+    await pool.query(`DELETE FROM avisos WHERE id=$1`, [id]);
+    res.json({ modo: 'excluido', mensagem: 'Aviso apagado.' });
+  } catch(e){ res.status(500).json({erro:e.message}); }
+});
+
+// BÔNUS: EXCLUIR TODOS OS ALUNOS DE UMA VEZ (pro seu caso)
+app.delete('/api/alunos', autenticarToken, autorizar('admin'), async (req, res) => {
+  try {
+    const preservar = req.query.preservarHistorico === 'true';
+    if (preservar) {
+      await pool.query(`UPDATE alunos SET ativo=false, arquivado_em=NOW()`);
+      res.json({ modo: 'arquivado', mensagem: 'Todos arquivados' });
+    } else {
+      await pool.query(`DELETE FROM frequencias`);
+      await pool.query(`DELETE FROM responsavel_aluno`);
+      await pool.query(`DELETE FROM alunos_responsaveis`);
+      await pool.query(`DELETE FROM matriculas`);
+      await pool.query(`DELETE FROM alunos`);
+      res.json({ modo: 'excluido', mensagem: 'Todos apagados' });
+    }
+  } catch(e){ res.status(500).json({erro:e.message}); }
+});
+
 // resto do seu server.js continua igual - vou copiar o essencial abaixo
 
 app.patch('/api/alunos/:id/inativar', autenticarToken, async (req, res) => {
