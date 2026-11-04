@@ -325,16 +325,84 @@ app.patch('/api/alunos/:id/inativar', autenticarToken, async (req, res) => {
 });
 
 app.delete('/api/alunos/:id', autenticarToken, autorizar('admin'), async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id <= 0) return res.status(400).json({ erro: 'ID de aluno inválido.' });
+
+    const client = await pool.connect();
+    let fotoAluno = null;
+    let arquivosJustificativas = [];
     try {
-        const id = Number(req.params.id);
-        if (!Number.isSafeInteger(id) || id <= 0) return res.status(400).json({ erro: 'ID de aluno inválido.' });
-        const result = await pool.query('DELETE FROM alunos WHERE id = $1 RETURNING id', [id]);
-        if (!result.rowCount) return res.status(404).json({ erro: 'Aluno não encontrado.' });
-        return res.json({ mensagem: 'Aluno excluído com sucesso.' });
+        await client.query('BEGIN');
+        const aluno = await client.query('SELECT id, foto_url FROM alunos WHERE id = $1 FOR UPDATE', [id]);
+        if (!aluno.rowCount) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ erro: 'Aluno não encontrado.' });
+        }
+        fotoAluno = aluno.rows[0].foto_url;
+
+        const justificativas = await client.query(
+            `SELECT j.arquivo_nome
+             FROM justificativas_falta j
+             JOIN frequencias f ON f.id = j.frequencia_id
+             WHERE f.aluno_id = $1`,
+            [id]
+        );
+        arquivosJustificativas = justificativas.rows.map((item) => item.arquivo_nome);
+
+        await client.query(
+            `DELETE FROM justificativas_falta
+             WHERE frequencia_id IN (SELECT id FROM frequencias WHERE aluno_id = $1)`,
+            [id]
+        );
+        await client.query('DELETE FROM frequencias WHERE aluno_id = $1', [id]);
+        await client.query('DELETE FROM notas WHERE aluno_id = $1', [id]);
+        await client.query('DELETE FROM historico_notas WHERE aluno_id = $1', [id]);
+        await client.query('DELETE FROM avisos WHERE aluno_id = $1', [id]);
+        await client.query('DELETE FROM responsavel_aluno WHERE aluno_id = $1', [id]);
+        await client.query('DELETE FROM alunos_responsaveis WHERE aluno_id = $1', [id]);
+        await client.query('DELETE FROM matriculas WHERE aluno_id = $1', [id]);
+
+        const result = await client.query('DELETE FROM alunos WHERE id = $1 RETURNING id', [id]);
+        if (!result.rowCount) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ erro: 'Aluno não encontrado.' });
+        }
+        await client.query('COMMIT');
+
+        const fotoMatch = typeof fotoAluno === 'string'
+            ? fotoAluno.match(/^\/uploads\/alunos\/([^/]+)$/)
+            : null;
+        const arquivosRelacionados = [
+            ...(fotoMatch ? [path.join(__dirname, 'uploads', 'alunos', fotoMatch[1])] : []),
+            ...arquivosJustificativas.map((nome) => path.join(__dirname, 'uploads', 'justificativas', path.basename(nome)))
+        ];
+        const falhasLimpeza = [];
+        for (const arquivo of arquivosRelacionados) {
+            try {
+                await fs.promises.unlink(arquivo);
+            } catch (erroArquivo) {
+                if (erroArquivo.code !== 'ENOENT') {
+                    falhasLimpeza.push(path.basename(arquivo));
+                    console.error('Erro ao remover arquivo do aluno excluído:', erroArquivo.message);
+                }
+            }
+        }
+
+        return res.json({
+            mensagem: 'Cadastro do aluno, vínculos e histórico escolar excluídos permanentemente.',
+            ...(falhasLimpeza.length ? { aviso: 'Não foi possível remover alguns arquivos anexos do armazenamento.' } : {})
+        });
     } catch (erro) {
-        if (erro.code === '23503') return res.status(409).json({ erro: 'Não é possível excluir este aluno porque ele possui matrícula, vínculo ou histórico escolar. Você pode inativá-lo.' });
+        try {
+            await client.query('ROLLBACK');
+        } catch (erroRollback) {
+            console.error('Erro ao cancelar exclusão do aluno:', erroRollback.message);
+        }
+        if (erro.code === '23503') return res.status(409).json({ erro: 'Há outro registro vinculado ao aluno. A exclusão foi cancelada e nenhum dado foi removido.' });
         console.error('Erro ao excluir aluno:', erro.message);
         return res.status(500).json({ erro: 'Não foi possível excluir o aluno.' });
+    } finally {
+        client.release();
     }
 });
 
