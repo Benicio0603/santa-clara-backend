@@ -2,7 +2,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const bcrypt = require('bcryptjs');
+const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
 
@@ -141,8 +141,7 @@ app.post('/api/login', async (req,res)=>{
 
 // --- TURMAS ---
 app.get('/api/turmas', autenticar, async (req,res)=>{
-  const r = await pool.query('SELECT * FROM turmas WHERE ativo IS NULL OR ativo=true ORDER BY nome');
-  res.json(r.rows);
+  try { const r = await pool.query('SELECT * FROM turmas WHERE ativo IS NULL OR ativo=true ORDER BY nome'); res.json(r.rows); } catch(e){ console.error(e); res.json([]); }
 });
 app.post('/api/turmas', autenticar, async (req,res)=>{
   const { nome, ano_letivo } = req.body;
@@ -164,8 +163,7 @@ app.delete('/api/turmas/:id', autenticar, async (req,res)=>{
 
 // --- DISCIPLINAS ---
 app.get('/api/disciplinas', autenticar, async (req,res)=>{
-  const r = await pool.query('SELECT * FROM disciplinas WHERE ativo IS NULL OR ativo=true ORDER BY nome');
-  res.json(r.rows);
+  try { const r = await pool.query('SELECT * FROM disciplinas WHERE ativo IS NULL OR ativo=true ORDER BY nome'); res.json(r.rows); } catch(e){ console.error(e); res.json([]); }
 });
 app.post('/api/disciplinas', autenticar, async (req,res)=>{
   const r = await pool.query('INSERT INTO disciplinas (nome) VALUES ($1) RETURNING *', [req.body.nome]);
@@ -185,8 +183,7 @@ app.delete('/api/disciplinas/:id', autenticar, async (req,res)=>{
 
 // --- PROFESSORES ---
 app.get('/api/professores', autenticar, async (req,res)=>{
-  const r = await pool.query('SELECT p.*, u.email FROM professores p LEFT JOIN usuarios u ON u.professor_id=p.id OR u.id=p.usuario_id WHERE p.ativo IS NULL OR p.ativo=true ORDER BY p.nome');
-  res.json(r.rows);
+  try { const r = await pool.query('SELECT p.*, u.email FROM professores p LEFT JOIN usuarios u ON u.professor_id=p.id OR u.id=p.usuario_id WHERE p.ativo IS NULL OR p.ativo=true ORDER BY p.nome'); res.json(r.rows); } catch(e){ console.error(e); res.json([]); }
 });
 app.post('/api/professores', autenticar, async (req,res)=>{
   const { nome, email, senha } = req.body;
@@ -220,8 +217,7 @@ app.delete('/api/professores/:id', autenticar, async (req,res)=>{
 
 // --- ALUNOS ---
 app.get('/api/alunos', autenticar, async (req,res)=>{
-  const r = await pool.query('SELECT * FROM alunos WHERE ativo IS NULL OR ativo=true ORDER BY nome');
-  res.json(r.rows);
+  try { const r = await pool.query('SELECT * FROM alunos WHERE ativo IS NULL OR ativo=true ORDER BY nome'); res.json(r.rows); } catch(e){ console.error(e); res.json([]); }
 });
 app.post('/api/alunos', autenticar, async (req,res)=>{
   const { nome, matricula, data_nascimento } = req.body;
@@ -303,26 +299,39 @@ app.delete('/api/alunos/:alunoId/responsaveis/:respId', autenticar, async (req,r
 
 // --- TURMAS-DISCIPLINAS ---
 app.get('/api/turmas-disciplinas/todos', autenticar, async (req,res)=>{
-  const r = await pool.query(`
-    SELECT td.id, td.turma_id, td.disciplina_id, td.professor_id,
-           t.nome as turma, d.nome as disciplina, p.nome as professor
-    FROM turmas_disciplinas td
-    LEFT JOIN turmas t ON t.id=td.turma_id
-    LEFT JOIN disciplinas d ON d.id=td.disciplina_id
-    LEFT JOIN professores p ON p.id=td.professor_id
-    UNION
-    SELECT td.id, td.turma_id, td.disciplina_id, td.professor_id,
-           t.nome as turma, d.nome as disciplina, p.nome as professor
-    FROM turma_disciplina td
-    LEFT JOIN turmas t ON t.id=td.turma_id
-    LEFT JOIN disciplinas d ON d.id=td.disciplina_id
-    LEFT JOIN professores p ON p.id=td.professor_id
-    ORDER BY turma
-  `);
-  // Remove duplicatas por id+turma+disciplina+prof
-  const map = new Map();
-  for (const row of r.rows) { const k=`${row.turma_id}-${row.disciplina_id}-${row.professor_id}`; if(!map.has(k)) map.set(k,row); }
-  res.json(Array.from(map.values()));
+  try {
+    let rows = [];
+    try {
+      const r1 = await pool.query(`
+        SELECT td.id, td.turma_id, td.disciplina_id, td.professor_id,
+               t.nome as turma, d.nome as disciplina, p.nome as professor
+        FROM turmas_disciplinas td
+        LEFT JOIN turmas t ON t.id=td.turma_id
+        LEFT JOIN disciplinas d ON d.id=td.disciplina_id
+        LEFT JOIN professores p ON p.id=td.professor_id
+        ORDER BY t.nome
+      `);
+      rows = rows.concat(r1.rows);
+    } catch(e){ console.log('Aviso turmas_disciplinas:', e.message); }
+    try {
+      const r2 = await pool.query(`
+        SELECT td.id, td.turma_id, td.disciplina_id, td.professor_id,
+               t.nome as turma, d.nome as disciplina, p.nome as professor
+        FROM turma_disciplina td
+        LEFT JOIN turmas t ON t.id=td.turma_id
+        LEFT JOIN disciplinas d ON d.id=td.disciplina_id
+        LEFT JOIN professores p ON p.id=td.professor_id
+        ORDER BY t.nome
+      `);
+      rows = rows.concat(r2.rows);
+    } catch(e){ console.log('Aviso turma_disciplina:', e.message); }
+    const map = new Map();
+    for (const row of rows) { const k=`${row.turma_id}-${row.disciplina_id}-${row.professor_id}`; if(!map.has(k)) map.set(k,row); }
+    res.json(Array.from(map.values()));
+  } catch(e){
+    console.error('Erro todos:', e);
+    res.json([]);
+  }
 });
 app.get('/api/turmas-disciplinas/minhas', autenticar, async (req,res)=>{
   // professor logado
@@ -363,8 +372,7 @@ app.delete('/api/turmas-disciplinas/:id', autenticar, async (req,res)=>{
 
 // --- MATRICULAS ---
 app.get('/api/matriculas', autenticar, async (req,res)=>{
-  const r = await pool.query('SELECT m.id, m.aluno_id, m.turma_id, a.nome as aluno, t.nome as turma FROM matriculas m JOIN alunos a ON a.id=m.aluno_id JOIN turmas t ON t.id=m.turma_id WHERE m.ativo IS NULL OR m.ativo=true ORDER BY t.nome, a.nome');
-  res.json(r.rows);
+  try { const r = await pool.query('SELECT m.id, m.aluno_id, m.turma_id, a.nome as aluno, t.nome as turma FROM matriculas m JOIN alunos a ON a.id=m.aluno_id JOIN turmas t ON t.id=m.turma_id WHERE m.ativo IS NULL OR m.ativo=true ORDER BY t.nome, a.nome'); res.json(r.rows); } catch(e){ console.error('matriculas', e); res.json([]); }
 });
 app.post('/api/matriculas', autenticar, async (req,res)=>{
   const { aluno_id, turma_id } = req.body;
