@@ -205,7 +205,7 @@ app.delete('/api/disciplinas/:id', autenticar, async (req,res)=>{
 
 // --- PROFESSORES ---
 app.get('/api/professores', autenticar, async (req,res)=>{
-  const r = await pool.query('SELECT p.*, u.email FROM professores p LEFT JOIN usuarios u ON u.professor_id=p.id OR u.id=p.usuario_id WHERE p.ativo IS NULL OR p.ativo=true ORDER BY p.nome');
+  const r = await pool.query('SELECT * FROM professores ORDER BY nome');
   res.json(r.rows);
 });
 app.post('/api/professores', autenticar, async (req,res)=>{
@@ -384,7 +384,7 @@ app.delete('/api/turmas-disciplinas/:id', autenticar, async (req,res)=>{
 
 // --- MATRICULAS ---
 app.get('/api/matriculas', autenticar, async (req,res)=>{
-  const r = await pool.query('SELECT m.id, m.aluno_id, m.turma_id, a.nome as aluno, t.nome as turma FROM matriculas m JOIN alunos a ON a.id=m.aluno_id JOIN turmas t ON t.id=m.turma_id WHERE m.ativo IS NULL OR m.ativo=true ORDER BY t.nome, a.nome');
+  const r = await pool.query('SELECT m.id, m.aluno_id, m.turma_id, a.nome as aluno, t.nome as turma FROM matriculas m JOIN alunos a ON a.id=m.aluno_id JOIN turmas t ON t.id=m.turma_id ORDER BY t.nome, a.nome');
   res.json(r.rows);
 });
 app.post('/api/matriculas', autenticar, async (req,res)=>{
@@ -465,7 +465,7 @@ app.put('/api/perfil/foto', autenticar, async (req,res)=>{
 
 // --- RESPONSAVEL / FILHOS ---
 app.get('/api/responsavel/filhos', autenticar, async (req,res)=>{
-  const r = await pool.query(`SELECT a.*, t.nome as turma FROM alunos a LEFT JOIN matriculas m ON m.aluno_id=a.id AND (m.ativo IS NULL OR m.ativo=true) LEFT JOIN turmas t ON t.id=m.turma_id WHERE a.id IN (SELECT ar.aluno_id FROM aluno_responsavel ar JOIN responsaveis rr ON rr.id=ar.responsavel_id WHERE rr.usuario_id=$1)`, [req.usuario.id]);
+  const r = await pool.query(`SELECT a.*, t.nome as turma FROM alunos a LEFT JOIN matriculas m ON m.aluno_id=a.id  LEFT JOIN turmas t ON t.id=m.turma_id WHERE a.id IN (SELECT ar.aluno_id FROM aluno_responsavel ar JOIN responsaveis rr ON rr.id=ar.responsavel_id WHERE rr.usuario_id=$1)`, [req.usuario.id]);
   res.json(r.rows);
 });
 
