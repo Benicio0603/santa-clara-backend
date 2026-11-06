@@ -141,8 +141,15 @@ app.post('/api/login', async (req,res)=>{
 
 // --- TURMAS ---
 app.get('/api/turmas', autenticar, async (req,res)=>{
-  const r = await pool.query('SELECT * FROM turmas WHERE ativo IS NULL OR ativo=true ORDER BY nome');
-  res.json(r.rows);
+  try {
+    if (req.query.incluirInativas === 'true') { const r = await pool.query('SELECT * FROM turmas ORDER BY nome'); return res.json(r.rows); }
+    const r = await pool.query('SELECT * FROM turmas WHERE ativo IS NULL OR ativo=true ORDER BY nome');
+    res.json(r.rows);
+  } catch(e){ console.error('GET turmas', e); res.json([]); }
+});
+app.post('/api/turmas/:id/reativar', autenticar, async (req,res)=>{
+  try { await pool.query('UPDATE turmas SET ativo=true WHERE id=$1', [req.params.id]); res.json({ mensagem: 'Turma reativada com sucesso!' }); }
+  catch(e){ res.status(400).json({ erro: e.message }); }
 });
 app.post('/api/turmas', autenticar, async (req,res)=>{
   const { nome, ano_letivo } = req.body;
@@ -183,8 +190,15 @@ app.delete('/api/turmas/:id', autenticar, async (req,res)=>{
 
 // --- DISCIPLINAS ---
 app.get('/api/disciplinas', autenticar, async (req,res)=>{
-  const r = await pool.query('SELECT * FROM disciplinas WHERE ativo IS NULL OR ativo=true ORDER BY nome');
-  res.json(r.rows);
+  try {
+    if (req.query.incluirInativas === 'true') { const r = await pool.query('SELECT * FROM disciplinas ORDER BY nome'); return res.json(r.rows); }
+    const r = await pool.query('SELECT * FROM disciplinas WHERE ativo IS NULL OR ativo=true ORDER BY nome');
+    res.json(r.rows);
+  } catch(e){ console.error('GET disciplinas', e); res.json([]); }
+});
+app.post('/api/disciplinas/:id/reativar', autenticar, async (req,res)=>{
+  try { await pool.query('UPDATE disciplinas SET ativo=true WHERE id=$1', [req.params.id]); res.json({ mensagem: 'Disciplina reativada!' }); }
+  catch(e){ res.status(400).json({ erro: e.message }); }
 });
 app.post('/api/disciplinas', autenticar, async (req,res)=>{
   const r = await pool.query('INSERT INTO disciplinas (nome) VALUES ($1) RETURNING *', [req.body.nome]);
@@ -204,8 +218,18 @@ app.delete('/api/disciplinas/:id', autenticar, async (req,res)=>{
 
 // --- PROFESSORES ---
 app.get('/api/professores', autenticar, async (req,res)=>{
-  const r = await pool.query('SELECT p.*, u.email FROM professores p LEFT JOIN usuarios u ON u.professor_id=p.id OR u.id=p.usuario_id WHERE p.ativo IS NULL OR p.ativo=true ORDER BY p.nome');
-  res.json(r.rows);
+  try {
+    if (req.query.incluirInativas === 'true') { const r = await pool.query('SELECT * FROM professores ORDER BY nome'); return res.json(r.rows); }
+    const r = await pool.query('SELECT * FROM professores WHERE ativo IS NULL OR ativo=true ORDER BY nome');
+    res.json(r.rows);
+  } catch(e){
+    try { const r2 = await pool.query('SELECT * FROM professores ORDER BY nome'); return res.json(r2.rows); }
+    catch(e2){ console.error('GET professores', e2); res.json([]); }
+  }
+});
+app.post('/api/professores/:id/reativar', autenticar, async (req,res)=>{
+  try { await pool.query('UPDATE professores SET ativo=true WHERE id=$1', [req.params.id]); res.json({ mensagem: 'Professor reativado!' }); }
+  catch(e){ res.status(400).json({ erro: e.message }); }
 });
 app.post('/api/professores', autenticar, async (req,res)=>{
   const { nome, email, senha } = req.body;
@@ -239,9 +263,13 @@ app.delete('/api/professores/:id', autenticar, async (req,res)=>{
 
 // --- ALUNOS ---
 app.get('/api/alunos', autenticar, async (req,res)=>{
-  const r = await pool.query('SELECT * FROM alunos WHERE ativo IS NULL OR ativo=true ORDER BY nome');
-  res.json(r.rows);
+  try {
+    if (req.query.incluirInativas === 'true') { const r = await pool.query('SELECT * FROM alunos ORDER BY nome'); return res.json(r.rows); }
+    const r = await pool.query('SELECT * FROM alunos WHERE ativo IS NULL OR ativo=true ORDER BY nome');
+    res.json(r.rows);
+  } catch(e){ console.error('GET alunos', e); res.json([]); }
 });
+app.post('/api/alunos/:id/reativar', autenticar, async (req,res)=>{ try { await pool.query('UPDATE alunos SET ativo=true WHERE id=$1', [req.params.id]); res.json({ mensagem: 'Aluno reativado!' }); } catch(e){ res.status(400).json({ erro: e.message }); } });
 app.post('/api/alunos', autenticar, async (req,res)=>{
   const { nome, matricula, data_nascimento } = req.body;
   const r = await pool.query('INSERT INTO alunos (nome,matricula,data_nascimento) VALUES ($1,$2,$3) RETURNING *', [nome,matricula, data_nascimento||null]);
