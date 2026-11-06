@@ -216,6 +216,7 @@ app.post('/api/professores', autenticar, async (req,res)=>{
   await pool.query('UPDATE usuarios SET professor_id=$1 WHERE id=$2', [p.rows[0].id, u.rows[0].id]);
   res.json({ mensagem:'Professor criado' });
 });
+app.post('/api/professores/:id/reativar', autenticar, async (req,res)=>{ await pool.query('UPDATE professores SET ativo=true WHERE id=$1', [req.params.id]); await pool.query('UPDATE usuarios SET ativo=true WHERE professor_id=$1', [req.params.id]); res.json({ mensagem: 'Professor reativado!' }); });
 app.put('/api/professores/:id', autenticar, async (req,res)=>{
   const { nome, email, senha } = req.body;
   await pool.query('UPDATE professores SET nome=$1, email=$2 WHERE id=$3', [nome,email,req.params.id]);
@@ -505,3 +506,6 @@ app.use((req,res)=>res.status(404).json({ erro:`Rota ${req.method} ${req.path} n
   await garantirTabelasFrequencias();
   app.listen(PORT, ()=>console.log(`Santa Clara backend rodando na porta ${PORT}`));
 })();
+
+app.post('/api/alunos/:id/reativar', autenticar, async (req,res)=>{ await pool.query('UPDATE alunos SET ativo=true WHERE id=$1', [req.params.id]); res.json({ mensagem: 'Aluno reativado!' }); });
+app.post('/api/responsaveis/:id/reativar', autenticar, async (req,res)=>{ await pool.query('UPDATE responsaveis SET ativo=true WHERE id=$1', [req.params.id]); res.json({ mensagem: 'Responsável reativado!' }); });
