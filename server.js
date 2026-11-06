@@ -157,9 +157,25 @@ app.put('/api/turmas/:id', autenticar, async (req,res)=>{
 app.delete('/api/turmas/:id', autenticar, async (req,res)=>{
   try {
     const preservar = req.query.preservarHistorico === 'true';
-    const ret = await excluirComOpcaoHistorico({ tabela:'turmas', id:req.params.id, preservarHistorico:preservar, tabelasDependentes:[{tabela:'matriculas',coluna:'turma_id'},{tabela:'turmas_disciplinas',coluna:'turma_id'},{tabela:'turma_disciplina',coluna:'turma_id'}] });
-    res.json(ret);
-  } catch(e){ res.status(400).json({ erro: e.message }); }
+    const id = req.params.id;
+    if (preservar) {
+      await pool.query('UPDATE turmas SET ativo=false WHERE id=$1', [id]);
+      return res.json({ mensagem: 'Turma inativada. Histórico preservado. Alunos mantidos no banco.' });
+    }
+    // Excluir TUDO - solta FKs antes
+    try { await pool.query('UPDATE alunos SET turma_id=NULL WHERE turma_id=$1', [id]); } catch(e){ console.log('alunos turma_id:', e.message); }
+    try { await pool.query('DELETE FROM matriculas WHERE turma_id=$1', [id]); } catch(e){}
+    try { await pool.query('DELETE FROM turmas_disciplinas WHERE turma_id=$1', [id]); } catch(e){}
+    try { await pool.query('DELETE FROM turma_disciplina WHERE turma_id=$1', [id]); } catch(e){}
+    try { await pool.query('DELETE FROM avisos WHERE turma_id=$1', [id]); } catch(e){}
+    // frequencias ligadas via turma_disciplina - já removidas acima, tenta limpar resto
+    await pool.query('DELETE FROM turmas WHERE id=$1', [id]);
+    res.json({ mensagem: 'Turma e vínculos excluídos permanentemente. Alunos foram desvinculados mas não apagados.' });
+  } catch(e){ 
+    console.error('Delete turma', e);
+    if (e.message.includes('foreign key')) return res.status(400).json({ erro: 'Essa turma ainda tem alunos/faltas vinculados. Escolha "Preservar histórico" para inativar sem apagar, ou desvincule os alunos primeiro.' });
+    res.status(400).json({ erro: e.message }); 
+  }
 });
 
 // --- DISCIPLINAS ---
@@ -178,8 +194,12 @@ app.put('/api/disciplinas/:id', autenticar, async (req,res)=>{
 app.delete('/api/disciplinas/:id', autenticar, async (req,res)=>{
   try {
     const preservar = req.query.preservarHistorico === 'true';
-    const ret = await excluirComOpcaoHistorico({ tabela:'disciplinas', id:req.params.id, preservarHistorico:preservar, tabelasDependentes:[{tabela:'turmas_disciplinas',coluna:'disciplina_id'},{tabela:'turma_disciplina',coluna:'disciplina_id'}] });
-    res.json(ret);
+    const id = req.params.id;
+    if (preservar) { await pool.query('UPDATE disciplinas SET ativo=false WHERE id=$1', [id]); return res.json({ mensagem: 'Disciplina inativada. Histórico preservado.' }); }
+    try { await pool.query('DELETE FROM turmas_disciplinas WHERE disciplina_id=$1', [id]); } catch(e){}
+    try { await pool.query('DELETE FROM turma_disciplina WHERE disciplina_id=$1', [id]); } catch(e){}
+    await pool.query('DELETE FROM disciplinas WHERE id=$1', [id]);
+    res.json({ mensagem: 'Disciplina excluída permanentemente.' });
   } catch(e){ res.status(400).json({ erro:e.message }); }
 });
 
