@@ -328,7 +328,7 @@ app.get('/api/responsaveis', autenticar, async (req,res)=>{
   }catch(e){ console.error('[GET /responsaveis]', e); res.status(400).json({ erro:e.message }); }
 });
 app.get('/api/alunos/:id/responsaveis', autenticar, async (req,res)=>{
-  const r = await pool.query(`SELECT r.*, ar.parentesco, u.email as usuario_email, r.telefone FROM responsaveis r JOIN aluno_responsavel ar ON ar.responsavel_id=r.id LEFT JOIN usuarios u ON u.id=r.usuario_id WHERE ar.aluno_id=$1 AND (r.ativo IS NULL OR r.ativo=true)`, [req.params.id]);
+  const r = await pool.query(`SELECT r.*, r.parentesco, u.email as usuario_email, r.telefone FROM responsaveis r JOIN aluno_responsavel ar ON ar.responsavel_id=r.id LEFT JOIN usuarios u ON u.id=r.usuario_id WHERE ar.aluno_id=$1 AND (r.ativo IS NULL OR r.ativo=true)`, [req.params.id]);
   res.json(r.rows);
 });
 app.post('/api/responsaveis', autenticar, async (req,res)=>{
@@ -349,7 +349,7 @@ app.post('/api/responsaveis', autenticar, async (req,res)=>{
       await pool.query('UPDATE usuarios SET nome=$1, senha=$2, senha_hash=$2, telefone=$3, responsavel_id=$4 WHERE id=$5', [nome.trim(), hash, telefone.trim(), nr.rows[0].id, uid]);
       for (const aluno_id of (alunos_ids||[])) {
         const vex = await pool.query('SELECT id FROM aluno_responsavel WHERE aluno_id=$1 AND responsavel_id=$2 LIMIT 1', [aluno_id, nr.rows[0].id]);
-        if(!vex.rows.length) await pool.query('INSERT INTO aluno_responsavel (aluno_id,responsavel_id,parentesco) VALUES ($1,$2,$3)', [aluno_id, nr.rows[0].id, parentesco||'Responsável']);
+        if(!vex.rows.length) await pool.query('INSERT INTO aluno_responsavel (aluno_id,responsavel_id) VALUES ($1,$2)', [aluno_id, nr.rows[0].id]);
       }
       return res.json({ mensagem:'Responsável recuperado (usuário órfão) e vinculado.' });
     }
@@ -371,7 +371,7 @@ app.post('/api/responsaveis', autenticar, async (req,res)=>{
     }
     for (const aluno_id of (alunos_ids||[])) {
       const vex = await pool.query('SELECT id FROM aluno_responsavel WHERE aluno_id=$1 AND responsavel_id=$2 LIMIT 1', [aluno_id, respId]);
-      if(!vex.rows.length) await pool.query('INSERT INTO aluno_responsavel (aluno_id,responsavel_id,parentesco) VALUES ($1,$2,$3)', [aluno_id, respId, parentesco||'Responsável']);
+      if(!vex.rows.length) await pool.query('INSERT INTO aluno_responsavel (aluno_id,responsavel_id) VALUES ($1,$2)', [aluno_id, respId]);
     }
     return res.json({ mensagem:'Responsável reativado e vinculado (e-mail reaproveitado).' });
   }
@@ -379,7 +379,7 @@ app.post('/api/responsaveis', autenticar, async (req,res)=>{
   const resp = await pool.query('INSERT INTO responsaveis (nome,telefone,usuario_id,parentesco) VALUES ($1,$2,$3,$4) RETURNING *', [nome.trim(),telefone.trim(),u.rows[0].id,parentesco||'Responsável']);
   await pool.query('UPDATE usuarios SET responsavel_id=$1 WHERE id=$2', [resp.rows[0].id, u.rows[0].id]);
   for (const aluno_id of (alunos_ids||[])) {
-    await pool.query('INSERT INTO aluno_responsavel (aluno_id,responsavel_id,parentesco) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING', [aluno_id, resp.rows[0].id, parentesco||'Responsável']);
+    await pool.query('INSERT INTO aluno_responsavel (aluno_id,responsavel_id) VALUES ($1,$2) ON CONFLICT DO NOTHING', [aluno_id, resp.rows[0].id]);
   }
   res.json({ mensagem:'Responsável criado e vinculado' });
   }catch(e){ console.error('[POST /responsaveis]', e); res.status(400).json({ erro:e.message }); }
@@ -396,15 +396,18 @@ app.put('/api/responsaveis/:id', autenticar, async (req,res)=>{
       await pool.query('DELETE FROM aluno_responsavel WHERE responsavel_id=$1', [req.params.id]);
       for (const aluno_id of alunos_ids) {
         if (!aluno_id || isNaN(Number(aluno_id))) continue;
-        await pool.query('INSERT INTO aluno_responsavel (aluno_id,responsavel_id,parentesco) VALUES ($1,$2,$3)', [Number(aluno_id), req.params.id, req.body.parentesco||'Responsável']);
+        await pool.query('INSERT INTO aluno_responsavel (aluno_id,responsavel_id) VALUES ($1,$2)', [Number(aluno_id), req.params.id]);
       }
     }
     res.json({ mensagem:'Responsável atualizado' });
   }catch(e){ console.error('[PUT /responsaveis]', e); res.status(400).json({ erro:e.message }); }
 });
 app.put('/api/alunos/:alunoId/responsaveis/:respId', autenticar, async (req,res)=>{
-  await pool.query('UPDATE aluno_responsavel SET parentesco=$1 WHERE aluno_id=$2 AND responsavel_id=$3', [req.body.parentesco, req.params.alunoId, req.params.respId]);
-  res.json({ mensagem:'Vínculo atualizado' });
+  try{
+    // parentesco NÃO existe em aluno_responsavel, só em responsaveis
+    await pool.query('UPDATE responsaveis SET parentesco=$1 WHERE id=$2', [req.body.parentesco||'Responsável', req.params.respId]);
+    res.json({ mensagem:'Vínculo atualizado' });
+  }catch(e){ console.error('[PUT aluno-responsavel]', e); res.status(400).json({ erro:e.message }); }
 });
 app.delete('/api/responsaveis/:id', autenticar, async (req,res)=>{
   try {
