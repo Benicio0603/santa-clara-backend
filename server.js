@@ -386,11 +386,20 @@ app.post('/api/responsaveis', autenticar, async (req,res)=>{
 });
 app.put('/api/responsaveis/:id', autenticar, async (req,res)=>{
   try{
-  const { nome, email, telefone } = req.body;
-  await pool.query('UPDATE responsaveis SET nome=$1,telefone=$2 WHERE id=$3', [nome,telefone,req.params.id]);
-  const r = await pool.query('SELECT usuario_id FROM responsaveis WHERE id=$1', [req.params.id]);
-  if (r.rows[0]?.usuario_id) await pool.query('UPDATE usuarios SET nome=$1,email=$2,telefone=$3 WHERE id=$4', [nome,email,telefone,r.rows[0].usuario_id]);
-  res.json({ mensagem:'Responsável atualizado' });
+    const { nome, email, telefone, alunos_ids } = req.body;
+    // responsaveis NÃO tem email - email fica só em usuarios
+    await pool.query('UPDATE responsaveis SET nome=$1,telefone=$2 WHERE id=$3', [nome,telefone,req.params.id]);
+    const r = await pool.query('SELECT usuario_id FROM responsaveis WHERE id=$1', [req.params.id]);
+    if (r.rows[0]?.usuario_id) await pool.query('UPDATE usuarios SET nome=$1,email=$2,telefone=$3 WHERE id=$4', [nome,email,telefone,r.rows[0].usuario_id]);
+    // Troca de aluno: se veio alunos_ids, apaga vínculos antigos e cria os novos
+    if (Array.isArray(alunos_ids)) {
+      await pool.query('DELETE FROM aluno_responsavel WHERE responsavel_id=$1', [req.params.id]);
+      for (const aluno_id of alunos_ids) {
+        if (!aluno_id || isNaN(Number(aluno_id))) continue;
+        await pool.query('INSERT INTO aluno_responsavel (aluno_id,responsavel_id,parentesco) VALUES ($1,$2,$3)', [Number(aluno_id), req.params.id, req.body.parentesco||'Responsável']);
+      }
+    }
+    res.json({ mensagem:'Responsável atualizado' });
   }catch(e){ console.error('[PUT /responsaveis]', e); res.status(400).json({ erro:e.message }); }
 });
 app.put('/api/alunos/:alunoId/responsaveis/:respId', autenticar, async (req,res)=>{
@@ -399,15 +408,16 @@ app.put('/api/alunos/:alunoId/responsaveis/:respId', autenticar, async (req,res)
 });
 app.delete('/api/responsaveis/:id', autenticar, async (req,res)=>{
   try {
+    const idNum = Number(req.params.id);
+    if (!idNum || isNaN(idNum)) return res.status(400).json({ erro:'ID do responsável inválido. Este registro é órfão (usuário sem responsável) - use o botão Recuperar ou cadastre de novo com o mesmo e-mail.' });
     const preservar = req.query.preservarHistorico === undefined ? true : req.query.preservarHistorico === 'true';
-    // BUG CORRIGIDO: buscar usuario_id ANTES de excluir. Antes buscava DEPOIS, e com Excluir TUDO a linha já tinha sumido -> usuário ficava órfão e ativo.
-    const ruAntes = await pool.query('SELECT usuario_id FROM responsaveis WHERE id=$1', [req.params.id]);
+    const ruAntes = await pool.query('SELECT usuario_id FROM responsaveis WHERE id=$1', [idNum]);
     const usuarioId = ruAntes.rows[0]?.usuario_id;
-    const ret = await excluirComOpcaoHistorico({ tabela:'responsaveis', id:req.params.id, preservarHistorico:preservar, tabelasDependentes:[{tabela:'aluno_responsavel',coluna:'responsavel_id'}] });
+    const ret = await excluirComOpcaoHistorico({ tabela:'responsaveis', id:idNum, preservarHistorico:preservar, tabelasDependentes:[{tabela:'aluno_responsavel',coluna:'responsavel_id'}] });
     if (usuarioId && !preservar) await pool.query('DELETE FROM usuarios WHERE id=$1', [usuarioId]);
     if (usuarioId && preservar) await pool.query('UPDATE usuarios SET ativo=false WHERE id=$1', [usuarioId]);
     res.json(ret);
-  } catch(e){ res.status(400).json({ erro:e.message }); }
+  } catch(e){ console.error('[DELETE /responsaveis]', e); res.status(400).json({ erro:e.message }); }
 });
 app.delete('/api/alunos/:alunoId/responsaveis/:respId', autenticar, async (req,res)=>{
   await pool.query('DELETE FROM aluno_responsavel WHERE aluno_id=$1 AND responsavel_id=$2', [req.params.alunoId, req.params.respId]);
