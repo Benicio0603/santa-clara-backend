@@ -327,9 +327,32 @@ app.post('/api/responsaveis', autenticar, async (req,res)=>{
   if(!nome?.trim()) return res.status(400).json({ erro:'Informe o nome do responsável.' });
   if(!email?.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) return res.status(400).json({ erro:'Informe um e-mail válido.' });
   if(!senha || senha.length < 8) return res.status(400).json({ erro:'A senha precisa ter pelo menos 8 caracteres.' });
-  const dup = await pool.query('SELECT id FROM usuarios WHERE LOWER(email)=LOWER($1) LIMIT 1', [email.trim()]);
-  if(dup.rows.length) return res.status(400).json({ erro:'Este e-mail já está cadastrado. Use outro e-mail ou edite o responsável existente.' });
+  // Se o e-mail já existe MAS está inativo (foi excluído com histórico), REATIVA em vez de travar.
+  // É esse o seu caso: você excluiu todos, mas o usuário ficou com ativo=false.
+  const dup = await pool.query('SELECT id, ativo, responsavel_id FROM usuarios WHERE LOWER(email)=LOWER($1) LIMIT 1', [email.trim()]);
+  if(dup.rows.length && dup.rows[0].ativo !== false){
+    return res.status(400).json({ erro:'Este e-mail já está cadastrado e ativo. Use outro e-mail ou edite o responsável existente em VÍNCULOS > Responsáveis já cadastrados.' });
+  }
   const hash = await bcrypt.hash(senha,10);
+  // Reaproveita o usuário inativo: atualiza nome/senha/telefone e reativa
+  if(dup.rows.length && dup.rows[0].ativo === false){
+    const uid = dup.rows[0].id;
+    await pool.query('UPDATE usuarios SET nome=$1, senha=$2, senha_hash=$2, telefone=$3, ativo=true WHERE id=$4', [nome.trim(), hash, telefone.trim(), uid]);
+    // Reativa o responsável ligado a ele, se existir, ou cria um novo
+    let respId = dup.rows[0].responsavel_id;
+    if(respId){
+      await pool.query('UPDATE responsaveis SET nome=$1, email=$2, telefone=$3, ativo=true, arquivado_em=NULL, arquivado_motivo=NULL WHERE id=$4', [nome.trim(), email.trim(), telefone.trim(), respId]);
+    } else {
+      const nr = await pool.query('INSERT INTO responsaveis (nome,email,telefone,usuario_id,parentesco,ativo) VALUES ($1,$2,$3,$4,$5,true) RETURNING id', [nome.trim(), email.trim(), telefone.trim(), uid, parentesco||'Responsável']);
+      respId = nr.rows[0].id;
+      await pool.query('UPDATE usuarios SET responsavel_id=$1 WHERE id=$2', [respId, uid]);
+    }
+    for (const aluno_id of (alunos_ids||[])) {
+      const vex = await pool.query('SELECT id FROM aluno_responsavel WHERE aluno_id=$1 AND responsavel_id=$2 LIMIT 1', [aluno_id, respId]);
+      if(!vex.rows.length) await pool.query('INSERT INTO aluno_responsavel (aluno_id,responsavel_id,parentesco) VALUES ($1,$2,$3)', [aluno_id, respId, parentesco||'Responsável']);
+    }
+    return res.json({ mensagem:'Responsável reativado e vinculado (e-mail reaproveitado).' });
+  }
   const u = await pool.query('INSERT INTO usuarios (nome,email,senha,senha_hash,perfil,telefone,ativo) VALUES ($1,$2,$3,$4,$5,$6,true) RETURNING id', [nome.trim(),email.trim(),hash,hash,'responsavel',telefone.trim()]);
   const resp = await pool.query('INSERT INTO responsaveis (nome,email,telefone,usuario_id,parentesco) VALUES ($1,$2,$3,$4,$5) RETURNING *', [nome.trim(),email.trim(),telefone.trim(),u.rows[0].id,parentesco||'Responsável']);
   await pool.query('UPDATE usuarios SET responsavel_id=$1 WHERE id=$2', [resp.rows[0].id, u.rows[0].id]);
