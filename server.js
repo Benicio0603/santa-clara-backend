@@ -312,6 +312,10 @@ app.get('/api/responsaveis', autenticar, async (req,res)=>{
     const r = await pool.query(`SELECT r.*, u.email as usuario_email,
       COALESCE((SELECT string_agg(a.nome, ', ' ORDER BY a.nome) FROM alunos a JOIN aluno_responsavel ar ON ar.aluno_id=a.id WHERE ar.responsavel_id=r.id), '') as alunos_vinculados
       FROM responsaveis r LEFT JOIN usuarios u ON u.id=r.usuario_id
+      UNION ALL
+      -- Órfãos: usuário de responsável sem linha em responsaveis (bug antigo do Excluir) - aparecem como "⚠️ órfão"
+      SELECT NULL as id, u.nome, u.email, u.telefone, u.id as usuario_id, 'Responsável' as parentesco, NULL as ativo, NULL as arquivado_em, NULL as arquivado_motivo, u.email as usuario_email, '' as alunos_vinculados
+      FROM usuarios u WHERE u.perfil='responsavel' AND NOT EXISTS (SELECT 1 FROM responsaveis r2 WHERE r2.usuario_id=u.id)
       ${incluir ? '' : 'WHERE (r.ativo IS NULL OR r.ativo=true)'}
       ORDER BY r.nome`);
     res.json(r.rows);
@@ -330,7 +334,19 @@ app.post('/api/responsaveis', autenticar, async (req,res)=>{
   // Se o e-mail já existe MAS está inativo (foi excluído com histórico), REATIVA em vez de travar.
   // É esse o seu caso: você excluiu todos, mas o usuário ficou com ativo=false.
   const dup = await pool.query('SELECT id, ativo, responsavel_id FROM usuarios WHERE LOWER(email)=LOWER($1) LIMIT 1', [email.trim()]);
+  // ÓRFÃO: usuário ativo mas sem linha em responsaveis (sobra do bug do Excluir TUDO) -> NÃO trava, cria a linha que falta
   if(dup.rows.length && dup.rows[0].ativo !== false){
+    const respExiste = await pool.query('SELECT id FROM responsaveis WHERE usuario_id=$1 LIMIT 1', [dup.rows[0].id]);
+    if(!respExiste.rows.length){
+      const uid = dup.rows[0].id;
+      const nr = await pool.query('INSERT INTO responsaveis (nome,email,telefone,usuario_id,parentesco,ativo) VALUES ($1,$2,$3,$4,$5,true) RETURNING id', [nome.trim(), email.trim(), telefone.trim(), uid, parentesco||'Responsável']);
+      await pool.query('UPDATE usuarios SET nome=$1, senha=$2, senha_hash=$2, telefone=$3, responsavel_id=$4 WHERE id=$5', [nome.trim(), hash, telefone.trim(), nr.rows[0].id, uid]);
+      for (const aluno_id of (alunos_ids||[])) {
+        const vex = await pool.query('SELECT id FROM aluno_responsavel WHERE aluno_id=$1 AND responsavel_id=$2 LIMIT 1', [aluno_id, nr.rows[0].id]);
+        if(!vex.rows.length) await pool.query('INSERT INTO aluno_responsavel (aluno_id,responsavel_id,parentesco) VALUES ($1,$2,$3)', [aluno_id, nr.rows[0].id, parentesco||'Responsável']);
+      }
+      return res.json({ mensagem:'Responsável recuperado (usuário órfão) e vinculado.' });
+    }
     return res.status(400).json({ erro:'Este e-mail já está cadastrado e ativo. Use outro e-mail ou edite o responsável existente em VÍNCULOS > Responsáveis já cadastrados.' });
   }
   const hash = await bcrypt.hash(senha,10);
@@ -378,11 +394,12 @@ app.put('/api/alunos/:alunoId/responsaveis/:respId', autenticar, async (req,res)
 app.delete('/api/responsaveis/:id', autenticar, async (req,res)=>{
   try {
     const preservar = req.query.preservarHistorico === undefined ? true : req.query.preservarHistorico === 'true';
+    // BUG CORRIGIDO: buscar usuario_id ANTES de excluir. Antes buscava DEPOIS, e com Excluir TUDO a linha já tinha sumido -> usuário ficava órfão e ativo.
+    const ruAntes = await pool.query('SELECT usuario_id, email FROM responsaveis WHERE id=$1', [req.params.id]);
+    const usuarioId = ruAntes.rows[0]?.usuario_id;
     const ret = await excluirComOpcaoHistorico({ tabela:'responsaveis', id:req.params.id, preservarHistorico:preservar, tabelasDependentes:[{tabela:'aluno_responsavel',coluna:'responsavel_id'}] });
-    // Também inativa usuário
-    const ru = await pool.query('SELECT usuario_id FROM responsaveis WHERE id=$1', [req.params.id]);
-    if (ru.rows[0]?.usuario_id && !preservar) await pool.query('DELETE FROM usuarios WHERE id=$1', [ru.rows[0].usuario_id]);
-    if (ru.rows[0]?.usuario_id && preservar) await pool.query('UPDATE usuarios SET ativo=false WHERE id=$1', [ru.rows[0].usuario_id]);
+    if (usuarioId && !preservar) await pool.query('DELETE FROM usuarios WHERE id=$1', [usuarioId]);
+    if (usuarioId && preservar) await pool.query('UPDATE usuarios SET ativo=false WHERE id=$1', [usuarioId]);
     res.json(ret);
   } catch(e){ res.status(400).json({ erro:e.message }); }
 });
