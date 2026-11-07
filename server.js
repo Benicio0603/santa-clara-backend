@@ -96,9 +96,25 @@ async function garantirTabelasFrequencias() {
       CREATE TABLE IF NOT EXISTS avisos (
         id SERIAL PRIMARY KEY, titulo VARCHAR(200), mensagem TEXT, turma_id INT, created_at TIMESTAMPTZ DEFAULT NOW(), ativo BOOLEAN DEFAULT true
       );
+      CREATE TABLE IF NOT EXISTS notas (
+        id SERIAL PRIMARY KEY,
+        aluno_id INT REFERENCES alunos(id) ON DELETE CASCADE,
+        disciplina_id INT REFERENCES disciplinas(id),
+        turma_id INT REFERENCES turmas(id),
+        professor_id INT REFERENCES professores(id),
+        bimestre INT,
+        nota NUMERIC(4,2),
+        observacao TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE(aluno_id, disciplina_id, turma_id, bimestre)
+      );
       CREATE TABLE IF NOT EXISTS justificativas (
         id SERIAL PRIMARY KEY, falta_id INT REFERENCES frequencias(id) ON DELETE CASCADE, nome_original VARCHAR(255), mime_type VARCHAR(100), dados BYTEA, created_at TIMESTAMPTZ DEFAULT NOW()
       );
+      ALTER TABLE frequencias ADD COLUMN IF NOT EXISTS justificativa TEXT;
+      ALTER TABLE frequencias ADD COLUMN IF NOT EXISTS anexo_url TEXT;
+      ALTER TABLE professores ADD COLUMN IF NOT EXISTS telefone VARCHAR(30);
+      ALTER TABLE turmas ALTER COLUMN ano_letivo SET DEFAULT 2027;
     `);
   } catch (e) { console.log('Aviso garantirTabelas:', e.message); }
 }
@@ -637,6 +653,32 @@ app.get('/api/avisos/destinatarios', autenticar, async (req,res)=>{
   }catch(e){ res.status(400).json({ erro:e.message }); }
 });
 // Notas: editar / excluir (professor) - histórico lê daqui automaticamente
+app.post('/api/notas', autenticar, async (req,res)=>{
+  try{
+    const { aluno_id, disciplina_id, turma_id, professor_id, bimestre, nota, observacao } = req.body;
+    if(!aluno_id || !disciplina_id || nota===undefined || nota===null) return res.status(400).json({ erro:'Informe aluno, disciplina e nota.' });
+    // Evita duplicar: mesmo aluno + disciplina + turma + bimestre atualiza em vez de duplicar
+    const ex = await pool.query('SELECT id FROM notas WHERE aluno_id=$1 AND disciplina_id=$2 AND COALESCE(turma_id,0)=COALESCE($3,0) AND COALESCE(bimestre,0)=COALESCE($4,0) LIMIT 1', [aluno_id, disciplina_id, turma_id||null, bimestre||null]);
+    if(ex.rows.length){
+      await pool.query('UPDATE notas SET nota=$1, observacao=$2, professor_id=$3 WHERE id=$4', [nota, observacao||null, professor_id||null, ex.rows[0].id]);
+      return res.json({ mensagem:'Nota atualizada (já existia para este bimestre).' });
+    }
+    const r = await pool.query('INSERT INTO notas (aluno_id, disciplina_id, turma_id, professor_id, bimestre, nota, observacao) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *', [aluno_id, disciplina_id, turma_id||null, professor_id||null, bimestre||null, nota, observacao||null]);
+    res.json(r.rows[0]);
+  }catch(e){ console.error('[POST /notas]', e); res.status(400).json({ erro:e.message }); }
+});
+app.get('/api/notas', autenticar, async (req,res)=>{
+  try{
+    const { aluno_id, turma_id, disciplina_id } = req.query;
+    let q = 'SELECT n.*, d.nome as disciplina, t.nome as turma, a.nome as aluno FROM notas n LEFT JOIN disciplinas d ON d.id=n.disciplina_id LEFT JOIN turmas t ON t.id=n.turma_id LEFT JOIN alunos a ON a.id=n.aluno_id WHERE 1=1';
+    const vals=[]; let i=1;
+    if(aluno_id){ q+=` AND n.aluno_id=$${i++}`; vals.push(aluno_id); }
+    if(turma_id){ q+=` AND n.turma_id=$${i++}`; vals.push(turma_id); }
+    if(disciplina_id){ q+=` AND n.disciplina_id=$${i++}`; vals.push(disciplina_id); }
+    q+=' ORDER BY a.nome, d.nome, n.bimestre';
+    const r = await pool.query(q, vals); res.json(r.rows);
+  }catch(e){ res.status(400).json({ erro:e.message }); }
+});
 app.put('/api/notas/:id', autenticar, async (req,res)=>{
   try{
     const { nota, bimestre, observacao } = req.body;
