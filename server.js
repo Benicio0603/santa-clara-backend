@@ -128,6 +128,7 @@ function autenticar(req, res, next) {
 }
 
 // SAUDE
+app.get('/api/versao', (req,res)=> res.json({ versao:'PRODUCAO-V2-2026-11-07', notas: true, professores_whatsapp: true, login_filho: true }));
 app.get('/api/saude', async (req,res)=>{
   try { await pool.query('SELECT 1'); res.json({status:'conectado', banco:'postgres'}); }
   catch(e){ res.json({status:'erro', erro:e.message}); }
