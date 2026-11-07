@@ -306,40 +306,46 @@ app.delete('/api/alunos/:id', autenticar, async (req,res)=>{
 });
 
 // --- RESPONSAVEIS ---
+app.get('/api/responsaveis', autenticar, async (req,res)=>{
+  try{
+    const incluir = req.query.incluirInativas === 'true';
+    const r = await pool.query(`SELECT r.*, u.email as usuario_email,
+      COALESCE((SELECT string_agg(a.nome, ', ' ORDER BY a.nome) FROM alunos a JOIN aluno_responsavel ar ON ar.aluno_id=a.id WHERE ar.responsavel_id=r.id), '') as alunos_vinculados
+      FROM responsaveis r LEFT JOIN usuarios u ON u.id=r.usuario_id
+      ${incluir ? '' : 'WHERE (r.ativo IS NULL OR r.ativo=true)'}
+      ORDER BY r.nome`);
+    res.json(r.rows);
+  }catch(e){ console.error('[GET /responsaveis]', e); res.status(400).json({ erro:e.message }); }
+});
 app.get('/api/alunos/:id/responsaveis', autenticar, async (req,res)=>{
   const r = await pool.query(`SELECT r.*, ar.parentesco, u.email as usuario_email, r.telefone FROM responsaveis r JOIN aluno_responsavel ar ON ar.responsavel_id=r.id LEFT JOIN usuarios u ON u.id=r.usuario_id WHERE ar.aluno_id=$1 AND (r.ativo IS NULL OR r.ativo=true)`, [req.params.id]);
   res.json(r.rows);
 });
 app.post('/api/responsaveis', autenticar, async (req,res)=>{
   try{
-    const { nome, email, senha, telefone, parentesco, alunos_ids } = req.body;
-    // Validação antes de qualquer INSERT - antes, senha vazia fazia bcrypt.hash quebrar e derrubar o servidor (502)
-    if(!nome?.trim()) return res.status(400).json({ erro:'Informe o nome do responsável.' });
-    if(!email?.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) return res.status(400).json({ erro:'Informe um e-mail válido para o responsável.' });
-    if(!senha || senha.length < 8) return res.status(400).json({ erro:'A senha inicial precisa ter pelo menos 8 caracteres.' });
-    if(!telefone?.trim()) return res.status(400).json({ erro:'Informe o WhatsApp do responsável.' });
-    // E-mail duplicado = erro mais comum aqui. Antes caía como 502, agora volta como 400 com mensagem clara.
-    const dup = await pool.query('SELECT id FROM usuarios WHERE LOWER(email)=LOWER($1) LIMIT 1', [email.trim()]);
-    if(dup.rows.length) return res.status(400).json({ erro:'Este e-mail já está cadastrado. Use outro e-mail ou edite o responsável existente em VÍNCULOS.' });
-    const hash = await bcrypt.hash(senha,10);
-    const u = await pool.query('INSERT INTO usuarios (nome,email,senha,senha_hash,perfil,telefone,ativo) VALUES ($1,$2,$3,$4,$5,$6,true) RETURNING id', [nome.trim(),email.trim(),hash,hash,'responsavel',telefone.trim()]);
-    const resp = await pool.query('INSERT INTO responsaveis (nome,email,telefone,usuario_id,parentesco) VALUES ($1,$2,$3,$4,$5) RETURNING *', [nome.trim(),email.trim(),telefone.trim(),u.rows[0].id,parentesco||'Responsável']);
-    await pool.query('UPDATE usuarios SET responsavel_id=$1 WHERE id=$2', [resp.rows[0].id, u.rows[0].id]);
-    for (const aluno_id of (alunos_ids||[])) {
-      // Evita duplicar vínculo sem usar ON CONFLICT
-      const vex = await pool.query('SELECT id FROM aluno_responsavel WHERE aluno_id=$1 AND responsavel_id=$2 LIMIT 1', [aluno_id, resp.rows[0].id]);
-      if(!vex.rows.length) await pool.query('INSERT INTO aluno_responsavel (aluno_id,responsavel_id,parentesco) VALUES ($1,$2,$3)', [aluno_id, resp.rows[0].id, parentesco||'Responsável']);
-    }
-    res.json({ mensagem:'Responsável criado e vinculado' });
+  const { nome, email, senha, telefone, parentesco, alunos_ids } = req.body;
+  if(!nome?.trim()) return res.status(400).json({ erro:'Informe o nome do responsável.' });
+  if(!email?.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) return res.status(400).json({ erro:'Informe um e-mail válido.' });
+  if(!senha || senha.length < 8) return res.status(400).json({ erro:'A senha precisa ter pelo menos 8 caracteres.' });
+  const dup = await pool.query('SELECT id FROM usuarios WHERE LOWER(email)=LOWER($1) LIMIT 1', [email.trim()]);
+  if(dup.rows.length) return res.status(400).json({ erro:'Este e-mail já está cadastrado. Use outro e-mail ou edite o responsável existente.' });
+  const hash = await bcrypt.hash(senha,10);
+  const u = await pool.query('INSERT INTO usuarios (nome,email,senha,senha_hash,perfil,telefone,ativo) VALUES ($1,$2,$3,$4,$5,$6,true) RETURNING id', [nome.trim(),email.trim(),hash,hash,'responsavel',telefone.trim()]);
+  const resp = await pool.query('INSERT INTO responsaveis (nome,email,telefone,usuario_id,parentesco) VALUES ($1,$2,$3,$4,$5) RETURNING *', [nome.trim(),email.trim(),telefone.trim(),u.rows[0].id,parentesco||'Responsável']);
+  await pool.query('UPDATE usuarios SET responsavel_id=$1 WHERE id=$2', [resp.rows[0].id, u.rows[0].id]);
+  for (const aluno_id of (alunos_ids||[])) {
+    await pool.query('INSERT INTO aluno_responsavel (aluno_id,responsavel_id,parentesco) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING', [aluno_id, resp.rows[0].id, parentesco||'Responsável']);
+  }
+  res.json({ mensagem:'Responsável criado e vinculado' });
   }catch(e){ console.error('[POST /responsaveis]', e); res.status(400).json({ erro:e.message }); }
 });
 app.put('/api/responsaveis/:id', autenticar, async (req,res)=>{
   try{
-    const { nome, email, telefone } = req.body;
-    await pool.query('UPDATE responsaveis SET nome=$1,email=$2,telefone=$3 WHERE id=$4', [nome,email,telefone,req.params.id]);
-    const r = await pool.query('SELECT usuario_id FROM responsaveis WHERE id=$1', [req.params.id]);
-    if (r.rows[0]?.usuario_id) await pool.query('UPDATE usuarios SET nome=$1,email=$2,telefone=$3 WHERE id=$4', [nome,email,telefone,r.rows[0].usuario_id]);
-    res.json({ mensagem:'Responsável atualizado' });
+  const { nome, email, telefone } = req.body;
+  await pool.query('UPDATE responsaveis SET nome=$1,email=$2,telefone=$3 WHERE id=$4', [nome,email,telefone,req.params.id]);
+  const r = await pool.query('SELECT usuario_id FROM responsaveis WHERE id=$1', [req.params.id]);
+  if (r.rows[0]?.usuario_id) await pool.query('UPDATE usuarios SET nome=$1,email=$2,telefone=$3 WHERE id=$4', [nome,email,telefone,r.rows[0].usuario_id]);
+  res.json({ mensagem:'Responsável atualizado' });
   }catch(e){ console.error('[PUT /responsaveis]', e); res.status(400).json({ erro:e.message }); }
 });
 app.put('/api/alunos/:alunoId/responsaveis/:respId', autenticar, async (req,res)=>{
@@ -432,10 +438,7 @@ app.post('/api/matriculas', autenticar, async (req,res)=>{
     const { aluno_id, turma_id } = req.body;
     if(!aluno_id || !turma_id) return res.status(400).json({ erro:'Selecione o aluno e a turma.' });
     const ex = await pool.query('SELECT id FROM matriculas WHERE aluno_id=$1 AND turma_id=$2 LIMIT 1', [aluno_id, turma_id]);
-    if(ex.rows.length){
-      await pool.query('UPDATE matriculas SET ativo=true WHERE id=$1', [ex.rows[0].id]);
-      return res.json({ mensagem:'Aluno já estava matriculado nesta turma - matrícula reativada.' });
-    }
+    if(ex.rows.length){ await pool.query('UPDATE matriculas SET ativo=true WHERE id=$1', [ex.rows[0].id]); return res.json({ mensagem:'Aluno já estava matriculado - matrícula reativada.' }); }
     await pool.query('INSERT INTO matriculas (aluno_id,turma_id,ativo) VALUES ($1,$2,true)', [aluno_id, turma_id]);
     res.json({ mensagem:'Matrícula salva' });
   }catch(e){ console.error('[POST /matriculas]', e); res.status(400).json({ erro:e.message }); }
