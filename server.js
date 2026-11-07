@@ -414,9 +414,19 @@ app.get('/api/matriculas', autenticar, async (req,res)=>{
   res.json(r.rows);
 });
 app.post('/api/matriculas', autenticar, async (req,res)=>{
-  const { aluno_id, turma_id } = req.body;
-  await pool.query('INSERT INTO matriculas (aluno_id,turma_id) VALUES ($1,$2) ON CONFLICT (aluno_id,turma_id) DO UPDATE SET ativo=true', [aluno_id,turma_id]);
-  res.json({ mensagem:'Matrícula salva' });
+  try{
+    const { aluno_id, turma_id } = req.body;
+    if(!aluno_id || !turma_id) return res.status(400).json({ erro:'Selecione o aluno e a turma.' });
+    // NÃO usa ON CONFLICT - a tabela matriculas não tem constraint unique(aluno_id,turma_id)
+    // e era isso que derrubava o servidor com erro 42P10.
+    const ex = await pool.query('SELECT id FROM matriculas WHERE aluno_id=$1 AND turma_id=$2 LIMIT 1', [aluno_id, turma_id]);
+    if(ex.rows.length){
+      await pool.query('UPDATE matriculas SET ativo=true WHERE id=$1', [ex.rows[0].id]);
+      return res.json({ mensagem:'Aluno já estava matriculado nesta turma - matrícula reativada.' });
+    }
+    await pool.query('INSERT INTO matriculas (aluno_id,turma_id,ativo) VALUES ($1,$2,true)', [aluno_id, turma_id]);
+    res.json({ mensagem:'Matrícula salva' });
+  }catch(e){ console.error('[POST /matriculas]', e); res.status(400).json({ erro:e.message }); }
 });
 app.put('/api/matriculas/:id', autenticar, async (req,res)=>{
   await pool.query('UPDATE matriculas SET aluno_id=$1,turma_id=$2 WHERE id=$3', [req.body.aluno_id, req.body.turma_id, req.params.id]);
