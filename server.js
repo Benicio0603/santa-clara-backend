@@ -109,7 +109,10 @@ async function garantirTabelasFrequencias() {
       CREATE TABLE IF NOT EXISTS avisos (
         id SERIAL PRIMARY KEY, titulo VARCHAR(200), mensagem TEXT, turma_id INT, created_at TIMESTAMPTZ DEFAULT NOW(), ativo BOOLEAN DEFAULT true
       );
+      ALTER TABLE avisos ADD COLUMN IF NOT EXISTS titulo VARCHAR(200);
+      ALTER TABLE avisos ADD COLUMN IF NOT EXISTS mensagem TEXT;
       ALTER TABLE avisos ADD COLUMN IF NOT EXISTS turma_id INT;
+      ALTER TABLE avisos ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
       ALTER TABLE avisos ADD COLUMN IF NOT EXISTS ativo BOOLEAN DEFAULT true;
       CREATE TABLE IF NOT EXISTS notas (
         id SERIAL PRIMARY KEY,
@@ -692,8 +695,27 @@ app.get('/api/turmas-disciplinas/minhas', autenticar, async (req,res)=>{
   if (!profId && req.usuario.perfil==='admin') {
     return res.json((await pool.query('SELECT td.id, td.turma_id, td.disciplina_id, td.professor_id, t.nome as turma, d.nome as disciplina FROM turmas_disciplinas td JOIN turmas t ON t.id=td.turma_id JOIN disciplinas d ON d.id=td.disciplina_id LIMIT 50')).rows);
   }
-  const r = await pool.query('SELECT td.id, td.turma_id, td.disciplina_id, td.professor_id, t.nome as turma, d.nome as disciplina FROM turmas_disciplinas td JOIN turmas t ON t.id=td.turma_id JOIN disciplinas d ON d.id=td.disciplina_id WHERE td.professor_id=$1 UNION SELECT td.id, td.turma_id, td.disciplina_id, td.professor_id, t.nome as turma, d.nome as disciplina FROM turma_disciplina td JOIN turmas t ON t.id=td.turma_id JOIN disciplinas d ON d.id=td.disciplina_id WHERE td.professor_id=$1', [profId]);
-  res.json(r.rows);
+  if (!profId) return res.json([]);
+  const r = await pool.query(`
+    SELECT td.id, td.turma_id, td.disciplina_id, td.professor_id, t.nome as turma, d.nome as disciplina
+    FROM turmas_disciplinas td
+    JOIN turmas t ON t.id=td.turma_id AND (t.ativo IS NULL OR t.ativo=true)
+    JOIN disciplinas d ON d.id=td.disciplina_id AND (d.ativo IS NULL OR d.ativo=true)
+    WHERE td.professor_id=$1
+    UNION
+    SELECT td.id, td.turma_id, td.disciplina_id, td.professor_id, t.nome as turma, d.nome as disciplina
+    FROM turma_disciplina td
+    JOIN turmas t ON t.id=td.turma_id AND (t.ativo IS NULL OR t.ativo=true)
+    JOIN disciplinas d ON d.id=td.disciplina_id AND (d.ativo IS NULL OR d.ativo=true)
+    WHERE td.professor_id=$1
+    ORDER BY turma, disciplina
+  `, [profId]);
+  const unique = new Map();
+  for (const row of r.rows) {
+    const key = `${row.turma_id}-${row.disciplina_id}-${row.professor_id}`;
+    if (!unique.has(key)) unique.set(key, row);
+  }
+  res.json(Array.from(unique.values()));
 });
 app.post('/api/turmas-disciplinas', autenticar, exigirPerfil('admin'), async (req,res)=>{
   const { turma_id, disciplina_id, professor_id } = req.body;
@@ -811,11 +833,28 @@ app.get('/api/faltas/aluno/:id', autenticar, async (req,res)=>{
   } else if (req.usuario.perfil === 'professor') {
     const assigned = await pool.query(`SELECT 1 FROM frequencias f
       JOIN professores p ON p.usuario_id=$2
-      JOIN turmas_disciplinas td ON td.id=f.turma_disciplina_id AND td.professor_id=p.id
+      JOIN (
+        SELECT id, professor_id FROM turmas_disciplinas
+        UNION
+        SELECT id, professor_id FROM turma_disciplina
+      ) td ON td.id=f.turma_disciplina_id AND td.professor_id=p.id
       WHERE f.aluno_id=$1 LIMIT 1`, [req.params.id, req.usuario.id]);
     if (!assigned.rowCount) return res.status(403).json({ erro:'Este aluno não pertence às turmas deste professor.' });
   }
-  const r = await pool.query(`SELECT f.*, t.nome as turma, d.nome as disciplina, p.nome as professor FROM frequencias f LEFT JOIN turmas_disciplinas td ON td.id=f.turma_disciplina_id LEFT JOIN turmas t ON t.id=td.turma_id LEFT JOIN disciplinas d ON d.id=td.disciplina_id LEFT JOIN professores p ON p.id=td.professor_id WHERE f.aluno_id=$1 AND f.presente=false ORDER BY f.data DESC`, [req.params.id]);
+  const r = await pool.query(`
+    SELECT f.*, t.nome as turma, d.nome as disciplina, p.nome as professor
+    FROM frequencias f
+    LEFT JOIN (
+      SELECT id, turma_id, disciplina_id, professor_id FROM turmas_disciplinas
+      UNION
+      SELECT id, turma_id, disciplina_id, professor_id FROM turma_disciplina
+    ) td ON td.id=f.turma_disciplina_id
+    LEFT JOIN turmas t ON t.id=td.turma_id
+    LEFT JOIN disciplinas d ON d.id=td.disciplina_id
+    LEFT JOIN professores p ON p.id=td.professor_id
+    WHERE f.aluno_id=$1 AND f.presente=false
+    ORDER BY f.data DESC
+  `, [req.params.id]);
   const total = r.rows.length;
   // justificativas
   for (const row of r.rows) {
@@ -861,8 +900,13 @@ app.get('/api/responsavel/professores', autenticar, exigirPerfil('responsavel'),
 
 // --- AVISOS ---
 app.get('/api/avisos', autenticar, async (req,res)=>{
-  const r = await pool.query('SELECT * FROM avisos WHERE ativo IS NULL OR ativo=true ORDER BY created_at DESC');
-  res.json(r.rows);
+  try {
+    const r = await pool.query('SELECT * FROM avisos WHERE ativo IS NULL OR ativo=true ORDER BY created_at DESC');
+    res.json(r.rows);
+  } catch(e) {
+    console.error('[GET /api/avisos]', e);
+    res.status(500).json({ erro:'Não foi possível carregar os avisos. Confira o schema do banco e os logs do serviço.' });
+  }
 });
 app.delete('/api/avisos/:id', autenticar, exigirPerfil('admin'), async (req,res)=>{
   try {
@@ -1143,7 +1187,10 @@ app.put('/api/frequencias/:id/justificativa', autenticar, exigirPerfil('professo
     let ownership = '';
     const values = [justificativa||null, anexo_url||null, req.params.id];
     if (req.usuario.perfil === 'professor') {
-      ownership = ' AND turma_disciplina_id IN (SELECT id FROM turmas_disciplinas WHERE professor_id=(SELECT id FROM professores WHERE usuario_id=$4))';
+      ownership = ` AND turma_disciplina_id IN (
+        SELECT id FROM turmas_disciplinas WHERE professor_id=(SELECT id FROM professores WHERE usuario_id=$4)
+        UNION SELECT id FROM turma_disciplina WHERE professor_id=(SELECT id FROM professores WHERE usuario_id=$4)
+      )`;
       values.push(req.usuario.id);
     }
     const result = await pool.query(`UPDATE frequencias SET justificativa=$1, anexo_url=COALESCE($2, anexo_url) WHERE id=$3${ownership} RETURNING id`, values);
