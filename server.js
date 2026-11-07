@@ -138,7 +138,12 @@ app.post('/api/login', async (req,res)=>{
   const { email, senha } = req.body;
   if (!email || !senha) return res.status(400).json({ erro: 'Informe e-mail e senha' });
   try {
-    const r = await pool.query('SELECT * FROM usuarios WHERE email=$1 LIMIT 1', [email.trim().toLowerCase()]);
+    // Responsável pode logar com e-mail OU com nome completo do filho
+    let r = await pool.query('SELECT * FROM usuarios WHERE email=$1 LIMIT 1', [email.trim().toLowerCase()]);
+    if(!r.rows.length){
+      // tenta por nome do aluno vinculado: responsavel -> aluno_responsavel -> alunos.nome
+      r = await pool.query(`SELECT u.* FROM usuarios u JOIN responsaveis resp ON resp.usuario_id=u.id JOIN aluno_responsavel ar ON ar.responsavel_id=resp.id JOIN alunos a ON a.id=ar.aluno_id WHERE LOWER(TRIM(a.nome))=LOWER(TRIM($1)) LIMIT 1`, [email.trim()]);
+    }
     const usuario = r.rows[0];
     if (!usuario || usuario.ativo === false) return res.status(401).json({ erro: 'Usuário não encontrado ou inativo' });
     let ok = false;
@@ -402,11 +407,11 @@ app.post('/api/responsaveis', autenticar, async (req,res)=>{
 });
 app.put('/api/responsaveis/:id', autenticar, async (req,res)=>{
   try{
-    const { nome, email, telefone, alunos_ids } = req.body;
+    const { nome, email, telefone, alunos_ids, senha_nova } = req.body;
     // responsaveis NÃO tem email - email fica só em usuarios
     await pool.query('UPDATE responsaveis SET nome=$1,telefone=$2 WHERE id=$3', [nome,telefone,req.params.id]);
     const r = await pool.query('SELECT usuario_id FROM responsaveis WHERE id=$1', [req.params.id]);
-    if (r.rows[0]?.usuario_id) await pool.query('UPDATE usuarios SET nome=$1,email=$2,telefone=$3 WHERE id=$4', [nome,email,telefone,r.rows[0].usuario_id]);
+    if (r.rows[0]?.usuario_id) { await pool.query('UPDATE usuarios SET nome=$1,email=$2,telefone=$3 WHERE id=$4', [nome,email,telefone,r.rows[0].usuario_id]); if(senha_nova && senha_nova.length>=8){ const hh = await bcrypt.hash(senha_nova,10); await pool.query('UPDATE usuarios SET senha=$1, senha_hash=$1 WHERE id=$2', [hh, r.rows[0].usuario_id]); } }
     // Troca de aluno: se veio alunos_ids, apaga vínculos antigos e cria os novos
     if (Array.isArray(alunos_ids)) {
       await pool.query('DELETE FROM aluno_responsavel WHERE responsavel_id=$1', [req.params.id]);
@@ -634,6 +639,14 @@ app.use((req,res)=>res.status(404).json({ erro:`Rota ${req.method} ${req.path} n
 // ===== PRODUÇÃO: FINALIZAÇÃO =====
 // Professores: garante coluna whatsapp/telefone
 // Avisos: editar + excluir permanente + listar destinatários p/ WhatsApp
+app.post('/api/avisos', autenticar, async (req,res)=>{
+  try{
+    const { titulo, mensagem, turma_id } = req.body;
+    if(!titulo?.trim() || !mensagem?.trim()) return res.status(400).json({ erro:'Informe título e mensagem do aviso.' });
+    const r = await pool.query('INSERT INTO avisos (titulo,mensagem,turma_id,ativo) VALUES ($1,$2,$3,true) RETURNING *', [titulo.trim(), mensagem.trim(), turma_id||null]);
+    res.json(r.rows[0]);
+  }catch(e){ res.status(400).json({ erro:e.message }); }
+});
 app.put('/api/avisos/:id', autenticar, async (req,res)=>{
   try{
     const { titulo, mensagem, turma_id, destinatario } = req.body;
