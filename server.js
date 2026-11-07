@@ -61,7 +61,7 @@ async function garantirTabelasFrequencias() {
         data_nascimento DATE, foto_url TEXT, ativo BOOLEAN DEFAULT true, created_at TIMESTAMPTZ DEFAULT NOW()
       );
       CREATE TABLE IF NOT EXISTS turmas (
-        id SERIAL PRIMARY KEY, nome VARCHAR(100) NOT NULL, ano_letivo INT DEFAULT 2026, ativo BOOLEAN DEFAULT true
+        id SERIAL PRIMARY KEY, nome VARCHAR(100) NOT NULL, ano_letivo INT DEFAULT 2027, ativo BOOLEAN DEFAULT true
       );
       CREATE TABLE IF NOT EXISTS disciplinas (
         id SERIAL PRIMARY KEY, nome VARCHAR(100) NOT NULL, ativo BOOLEAN DEFAULT true
@@ -614,5 +614,87 @@ app.use((req,res)=>res.status(404).json({ erro:`Rota ${req.method} ${req.path} n
 
 (async ()=>{
   await garantirTabelasFrequencias();
-  app.listen(PORT, ()=>console.log(`Santa Clara backend rodando na porta ${PORT}`));
+  
+// ===== PRODUÇÃO: FINALIZAÇÃO =====
+// Professores: garante coluna whatsapp/telefone
+// Avisos: editar + excluir permanente + listar destinatários p/ WhatsApp
+app.put('/api/avisos/:id', autenticar, async (req,res)=>{
+  try{
+    const { titulo, mensagem, turma_id, destinatario } = req.body;
+    await pool.query('UPDATE avisos SET titulo=$1, mensagem=$2, turma_id=$3 WHERE id=$4', [titulo, mensagem, turma_id||null, req.params.id]);
+    res.json({ mensagem:'Aviso atualizado' });
+  }catch(e){ res.status(400).json({ erro:e.message }); }
+});
+app.delete('/api/avisos/:id', autenticar, async (req,res)=>{
+  try{ await pool.query('DELETE FROM avisos WHERE id=$1', [req.params.id]); res.json({ mensagem:'Aviso excluído permanentemente.' }); }
+  catch(e){ res.status(400).json({ erro:e.message }); }
+});
+app.get('/api/avisos/destinatarios', autenticar, async (req,res)=>{
+  try{
+    const profs = await pool.query("SELECT nome, telefone FROM professores WHERE (ativo IS NULL OR ativo=true) AND telefone IS NOT NULL AND telefone <> ''");
+    const resps = await pool.query("SELECT r.nome, r.telefone FROM responsaveis r WHERE (r.ativo IS NULL OR r.ativo=true) AND r.telefone IS NOT NULL AND r.telefone <> ''");
+    res.json({ professores: profs.rows, responsaveis: resps.rows });
+  }catch(e){ res.status(400).json({ erro:e.message }); }
+});
+// Notas: editar / excluir (professor) - histórico lê daqui automaticamente
+app.put('/api/notas/:id', autenticar, async (req,res)=>{
+  try{
+    const { nota, bimestre, observacao } = req.body;
+    await pool.query('UPDATE notas SET nota=$1, bimestre=$2, observacao=$3 WHERE id=$4', [nota, bimestre||null, observacao||null, req.params.id]);
+    res.json({ mensagem:'Nota atualizada' });
+  }catch(e){ res.status(400).json({ erro:e.message }); }
+});
+app.delete('/api/notas/:id', autenticar, async (req,res)=>{
+  try{ await pool.query('DELETE FROM notas WHERE id=$1', [req.params.id]); res.json({ mensagem:'Nota excluída permanentemente.' }); }
+  catch(e){ res.status(400).json({ erro:e.message }); }
+});
+// Histórico: lê direto das notas lançadas (sem tabela duplicada)
+app.get('/api/historico/:alunoId', autenticar, async (req,res)=>{
+  try{
+    const r = await pool.query(`SELECT n.*, d.nome as disciplina, t.nome as turma FROM notas n LEFT JOIN disciplinas d ON d.id=n.disciplina_id LEFT JOIN turmas t ON t.id=n.turma_id WHERE n.aluno_id=$1 ORDER BY d.nome, n.bimestre`, [req.params.alunoId]);
+    res.json(r.rows);
+  }catch(e){ res.status(400).json({ erro:e.message }); }
+});
+// Frequência + justificativa: professor anota, responsável anexa documento (URL/base64)
+app.put('/api/frequencias/:id/justificativa', autenticar, async (req,res)=>{
+  try{
+    const { justificativa, anexo_url } = req.body;
+    await pool.query('UPDATE frequencias SET justificativa=$1, anexo_url=$2 WHERE id=$3', [justificativa||null, anexo_url||null, req.params.id]);
+    res.json({ mensagem:'Justificativa salva' });
+  }catch(e){ res.status(400).json({ erro:e.message }); }
+});
+app.post('/api/frequencias/:id/anexo', autenticar, async (req,res)=>{
+  try{
+    const { anexo_url, descricao } = req.body;
+    await pool.query('UPDATE frequencias SET anexo_url=$1, justificativa=COALESCE(justificativa,$2) WHERE id=$3', [anexo_url, descricao||'Documento anexado pelo responsável', req.params.id]);
+    res.json({ mensagem:'Documento anexado' });
+  }catch(e){ res.status(400).json({ erro:e.message }); }
+});
+// Responsável: trocar a própria senha (mínimo 8) + login = nome completo do filho
+app.post('/api/responsaveis/trocar-senha', autenticar, async (req,res)=>{
+  try{
+    const { senha_atual, senha_nova } = req.body;
+    if(!senha_nova || senha_nova.length < 8) return res.status(400).json({ erro:'A nova senha precisa ter pelo menos 8 caracteres.' });
+    const u = await pool.query('SELECT id, senha, senha_hash FROM usuarios WHERE id=$1', [req.user?.id || req.body.usuario_id]);
+    if(!u.rows.length) return res.status(404).json({ erro:'Usuário não encontrado.' });
+    const ok = senha_atual ? await bcrypt.compare(senha_atual, u.rows[0].senha_hash || u.rows[0].senha || '') : true;
+    if(!ok) return res.status(400).json({ erro:'Senha atual incorreta.' });
+    const hash = await bcrypt.hash(senha_nova, 10);
+    await pool.query('UPDATE usuarios SET senha=$1, senha_hash=$1 WHERE id=$2', [hash, u.rows[0].id]);
+    res.json({ mensagem:'Senha alterada com sucesso.' });
+  }catch(e){ res.status(400).json({ erro:e.message }); }
+});
+// Professores: garantir telefone/whatsapp no PUT
+app.put('/api/professores/:id', autenticar, async (req,res)=>{
+  try{
+    const { nome, email, telefone, whatsapp } = req.body;
+    const tel = whatsapp || telefone || '';
+    await pool.query('UPDATE professores SET nome=$1, email=$2, telefone=$3 WHERE id=$4', [nome, email, tel, req.params.id]);
+    const r = await pool.query('SELECT usuario_id FROM professores WHERE id=$1', [req.params.id]);
+    if(r.rows[0]?.usuario_id) await pool.query('UPDATE usuarios SET nome=$1, email=$2, telefone=$3 WHERE id=$4', [nome, email, tel, r.rows[0].usuario_id]);
+    res.json({ mensagem:'Professor atualizado' });
+  }catch(e){ res.status(400).json({ erro:e.message }); }
+});
+
+app.listen(PORT, ()=>console.log(`Santa Clara backend rodando na porta ${PORT}`));
 })();
