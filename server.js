@@ -109,6 +109,8 @@ async function garantirTabelasFrequencias() {
       CREATE TABLE IF NOT EXISTS avisos (
         id SERIAL PRIMARY KEY, titulo VARCHAR(200), mensagem TEXT, turma_id INT, created_at TIMESTAMPTZ DEFAULT NOW(), ativo BOOLEAN DEFAULT true
       );
+      ALTER TABLE avisos ADD COLUMN IF NOT EXISTS turma_id INT;
+      ALTER TABLE avisos ADD COLUMN IF NOT EXISTS ativo BOOLEAN DEFAULT true;
       CREATE TABLE IF NOT EXISTS notas (
         id SERIAL PRIMARY KEY,
         aluno_id INT REFERENCES alunos(id) ON DELETE CASCADE,
@@ -947,22 +949,31 @@ app.put('/api/avisos/:id', autenticar, exigirPerfil('admin'), async (req,res)=>{
 });
 app.get('/api/avisos/destinatarios', autenticar, exigirPerfil('admin'), async (req,res)=>{
   try{
-    const [teachers, classes, students] = await Promise.all([
+    const [teachers, responsibleRows, orphanResponsibleUsers] = await Promise.all([
       pool.query("SELECT id, nome, telefone FROM professores WHERE (ativo IS NULL OR ativo=true) ORDER BY nome"),
-      pool.query("SELECT id, nome FROM turmas WHERE (ativo IS NULL OR ativo=true) ORDER BY nome"),
       pool.query(`
-        SELECT a.id AS aluno_id, a.nome AS aluno, m.turma_id, t.nome AS turma,
-               r.nome, r.telefone
-        FROM matriculas m
-        JOIN alunos a ON a.id=m.aluno_id AND (a.ativo IS NULL OR a.ativo=true)
-        JOIN turmas t ON t.id=m.turma_id AND (t.ativo IS NULL OR t.ativo=true)
-        LEFT JOIN aluno_responsavel ar ON ar.aluno_id=a.id
-        LEFT JOIN responsaveis r ON r.id=ar.responsavel_id AND (r.ativo IS NULL OR r.ativo=true)
-        WHERE m.ativo IS NULL OR m.ativo=true
-        ORDER BY t.nome, a.nome, r.nome
+        SELECT r.id, r.nome, COALESCE(NULLIF(r.telefone, ''), u.telefone) AS telefone,
+               STRING_AGG(DISTINCT a.nome, ', ' ORDER BY a.nome) AS alunos
+        FROM responsaveis r
+        LEFT JOIN usuarios u ON u.id=r.usuario_id
+        LEFT JOIN aluno_responsavel ar ON ar.responsavel_id=r.id
+        LEFT JOIN alunos a ON a.id=ar.aluno_id
+        WHERE (r.ativo IS NULL OR r.ativo=true) AND (u.ativo IS NULL OR u.ativo=true)
+        GROUP BY r.id, r.nome, r.telefone, u.telefone
+      `),
+      pool.query(`
+        SELECT u.id, u.nome, u.telefone, NULL::text AS alunos
+        FROM usuarios u
+        WHERE u.perfil='responsavel' AND (u.ativo IS NULL OR u.ativo=true)
+          AND NOT EXISTS (SELECT 1 FROM responsaveis r WHERE r.usuario_id=u.id)
       `)
     ]);
-    res.json({ professores: teachers.rows, turmas: classes.rows, alunos: students.rows });
+    const responsaveis = [...responsibleRows.rows, ...orphanResponsibleUsers.rows]
+      .sort((left, right) => String(left.nome || '').localeCompare(String(right.nome || ''), 'pt-BR'));
+    res.json({
+      professores: teachers.rows,
+      responsaveis
+    });
   }catch(e){ console.error('[GET /avisos/destinatarios]', e); res.status(500).json({ erro:'Não foi possível carregar os destinatários do aviso.' }); }
 });
 app.get('/api/professor/avisos/destinatarios', autenticar, exigirPerfil('professor'), async (req,res)=>{
@@ -998,6 +1009,37 @@ app.get('/api/professor/avisos/destinatarios', autenticar, exigirPerfil('profess
     `, [turmaId, alunoId]);
     res.json(recipients.rows);
   }catch(e){ console.error('[GET /professor/avisos/destinatarios]', e); res.status(500).json({ erro:'Não foi possível carregar os responsáveis da turma.' }); }
+});
+app.get('/api/professor/turmas/:turmaId/alunos', autenticar, exigirPerfil('professor'), async (req,res)=>{
+  try{
+    const turmaId = Number(req.params.turmaId);
+    const disciplinaId = Number(req.query.disciplina_id);
+    if (!Number.isInteger(turmaId) || turmaId < 1 || !Number.isInteger(disciplinaId) || disciplinaId < 1) {
+      return res.status(400).json({ erro:'Selecione uma turma e disciplina válidas.' });
+    }
+    const teacher = await pool.query(
+      'SELECT id FROM professores WHERE usuario_id=$1 AND (ativo IS NULL OR ativo=true)',
+      [req.usuario.id]
+    );
+    if (!teacher.rowCount) return res.status(403).json({ erro:'Não foi encontrado um cadastro ativo para este professor.' });
+    const assignment = await pool.query(`
+      SELECT 1 FROM turmas_disciplinas
+      WHERE turma_id=$1 AND disciplina_id=$2 AND professor_id=$3
+      UNION
+      SELECT 1 FROM turma_disciplina
+      WHERE turma_id=$1 AND disciplina_id=$2 AND professor_id=$3
+      LIMIT 1
+    `, [turmaId, disciplinaId, teacher.rows[0].id]);
+    if (!assignment.rowCount) return res.status(403).json({ erro:'Esta turma e disciplina não estão vinculadas ao professor.' });
+    const students = await pool.query(`
+      SELECT DISTINCT a.id, a.nome, a.matricula
+      FROM alunos a
+      JOIN matriculas m ON m.aluno_id=a.id AND m.turma_id=$1
+      WHERE (a.ativo IS NULL OR a.ativo=true) AND (m.ativo IS NULL OR m.ativo=true)
+      ORDER BY a.nome
+    `, [turmaId]);
+    res.json(students.rows);
+  }catch(e){ console.error('[GET /professor/turmas/:turmaId/alunos]', e); res.status(500).json({ erro:'Não foi possível carregar os alunos matriculados nesta turma.' }); }
 });
 // Notas: editar / excluir (professor) - histórico lê daqui automaticamente
 app.post('/api/notas', autenticar, exigirPerfil('admin', 'professor'), async (req,res)=>{
