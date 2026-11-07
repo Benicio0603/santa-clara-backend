@@ -309,15 +309,21 @@ app.delete('/api/alunos/:id', autenticar, async (req,res)=>{
 app.get('/api/responsaveis', autenticar, async (req,res)=>{
   try{
     const incluir = req.query.incluirInativas === 'true';
-    const r = await pool.query(`SELECT r.*, u.email as usuario_email,
-      COALESCE((SELECT string_agg(a.nome, ', ' ORDER BY a.nome) FROM alunos a JOIN aluno_responsavel ar ON ar.aluno_id=a.id WHERE ar.responsavel_id=r.id), '') as alunos_vinculados
-      FROM responsaveis r LEFT JOIN usuarios u ON u.id=r.usuario_id
-      UNION ALL
-      -- Órfãos: usuário de responsável sem linha em responsaveis (bug antigo do Excluir) - aparecem como "⚠️ órfão"
-      SELECT NULL as id, u.nome, u.email, u.telefone, u.id as usuario_id, 'Responsável' as parentesco, NULL as ativo, NULL as arquivado_em, NULL as arquivado_motivo, u.email as usuario_email, '' as alunos_vinculados
-      FROM usuarios u WHERE u.perfil='responsavel' AND NOT EXISTS (SELECT 1 FROM responsaveis r2 WHERE r2.usuario_id=u.id)
-      ${incluir ? '' : 'WHERE (r.ativo IS NULL OR r.ativo=true)'}
-      ORDER BY r.nome`);
+    // ATENÇÃO: responsaveis NÃO tem coluna email. E-mail fica só em usuarios.
+    // Por isso selecionamos colunas explícitas, nunca r.* + r.email.
+    const r = await pool.query(`
+      SELECT * FROM (
+        SELECT r.id, r.nome, r.telefone, r.usuario_id, r.parentesco, r.ativo,
+               u.email as usuario_email,
+               COALESCE((SELECT string_agg(a.nome, ', ' ORDER BY a.nome) FROM alunos a JOIN aluno_responsavel ar ON ar.aluno_id=a.id WHERE ar.responsavel_id=r.id), '') as alunos_vinculados
+        FROM responsaveis r LEFT JOIN usuarios u ON u.id=r.usuario_id
+        UNION ALL
+        SELECT NULL as id, u.nome, u.telefone, u.id as usuario_id, 'Responsável' as parentesco, u.ativo as ativo,
+               u.email as usuario_email, '' as alunos_vinculados
+        FROM usuarios u WHERE u.perfil='responsavel' AND NOT EXISTS (SELECT 1 FROM responsaveis r2 WHERE r2.usuario_id=u.id)
+      ) t
+      ${incluir ? '' : 'WHERE (t.ativo IS NULL OR t.ativo=true)'}
+      ORDER BY t.nome`);
     res.json(r.rows);
   }catch(e){ console.error('[GET /responsaveis]', e); res.status(400).json({ erro:e.message }); }
 });
@@ -339,7 +345,7 @@ app.post('/api/responsaveis', autenticar, async (req,res)=>{
     const respExiste = await pool.query('SELECT id FROM responsaveis WHERE usuario_id=$1 LIMIT 1', [dup.rows[0].id]);
     if(!respExiste.rows.length){
       const uid = dup.rows[0].id;
-      const nr = await pool.query('INSERT INTO responsaveis (nome,email,telefone,usuario_id,parentesco,ativo) VALUES ($1,$2,$3,$4,$5,true) RETURNING id', [nome.trim(), email.trim(), telefone.trim(), uid, parentesco||'Responsável']);
+      const nr = await pool.query('INSERT INTO responsaveis (nome,telefone,usuario_id,parentesco,ativo) VALUES ($1,$2,$3,$4,true) RETURNING id', [nome.trim(), telefone.trim(), uid, parentesco||'Responsável']);
       await pool.query('UPDATE usuarios SET nome=$1, senha=$2, senha_hash=$2, telefone=$3, responsavel_id=$4 WHERE id=$5', [nome.trim(), hash, telefone.trim(), nr.rows[0].id, uid]);
       for (const aluno_id of (alunos_ids||[])) {
         const vex = await pool.query('SELECT id FROM aluno_responsavel WHERE aluno_id=$1 AND responsavel_id=$2 LIMIT 1', [aluno_id, nr.rows[0].id]);
@@ -357,9 +363,9 @@ app.post('/api/responsaveis', autenticar, async (req,res)=>{
     // Reativa o responsável ligado a ele, se existir, ou cria um novo
     let respId = dup.rows[0].responsavel_id;
     if(respId){
-      await pool.query('UPDATE responsaveis SET nome=$1, email=$2, telefone=$3, ativo=true, arquivado_em=NULL, arquivado_motivo=NULL WHERE id=$4', [nome.trim(), email.trim(), telefone.trim(), respId]);
+      await pool.query('UPDATE responsaveis SET nome=$1, telefone=$2, ativo=true WHERE id=$3', [nome.trim(), telefone.trim(), respId]);
     } else {
-      const nr = await pool.query('INSERT INTO responsaveis (nome,email,telefone,usuario_id,parentesco,ativo) VALUES ($1,$2,$3,$4,$5,true) RETURNING id', [nome.trim(), email.trim(), telefone.trim(), uid, parentesco||'Responsável']);
+      const nr = await pool.query('INSERT INTO responsaveis (nome,telefone,usuario_id,parentesco,ativo) VALUES ($1,$2,$3,$4,true) RETURNING id', [nome.trim(), telefone.trim(), uid, parentesco||'Responsável']);
       respId = nr.rows[0].id;
       await pool.query('UPDATE usuarios SET responsavel_id=$1 WHERE id=$2', [respId, uid]);
     }
@@ -370,7 +376,7 @@ app.post('/api/responsaveis', autenticar, async (req,res)=>{
     return res.json({ mensagem:'Responsável reativado e vinculado (e-mail reaproveitado).' });
   }
   const u = await pool.query('INSERT INTO usuarios (nome,email,senha,senha_hash,perfil,telefone,ativo) VALUES ($1,$2,$3,$4,$5,$6,true) RETURNING id', [nome.trim(),email.trim(),hash,hash,'responsavel',telefone.trim()]);
-  const resp = await pool.query('INSERT INTO responsaveis (nome,email,telefone,usuario_id,parentesco) VALUES ($1,$2,$3,$4,$5) RETURNING *', [nome.trim(),email.trim(),telefone.trim(),u.rows[0].id,parentesco||'Responsável']);
+  const resp = await pool.query('INSERT INTO responsaveis (nome,telefone,usuario_id,parentesco) VALUES ($1,$2,$3,$4) RETURNING *', [nome.trim(),telefone.trim(),u.rows[0].id,parentesco||'Responsável']);
   await pool.query('UPDATE usuarios SET responsavel_id=$1 WHERE id=$2', [resp.rows[0].id, u.rows[0].id]);
   for (const aluno_id of (alunos_ids||[])) {
     await pool.query('INSERT INTO aluno_responsavel (aluno_id,responsavel_id,parentesco) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING', [aluno_id, resp.rows[0].id, parentesco||'Responsável']);
@@ -381,7 +387,7 @@ app.post('/api/responsaveis', autenticar, async (req,res)=>{
 app.put('/api/responsaveis/:id', autenticar, async (req,res)=>{
   try{
   const { nome, email, telefone } = req.body;
-  await pool.query('UPDATE responsaveis SET nome=$1,email=$2,telefone=$3 WHERE id=$4', [nome,email,telefone,req.params.id]);
+  await pool.query('UPDATE responsaveis SET nome=$1,telefone=$2 WHERE id=$3', [nome,telefone,req.params.id]);
   const r = await pool.query('SELECT usuario_id FROM responsaveis WHERE id=$1', [req.params.id]);
   if (r.rows[0]?.usuario_id) await pool.query('UPDATE usuarios SET nome=$1,email=$2,telefone=$3 WHERE id=$4', [nome,email,telefone,r.rows[0].usuario_id]);
   res.json({ mensagem:'Responsável atualizado' });
@@ -395,7 +401,7 @@ app.delete('/api/responsaveis/:id', autenticar, async (req,res)=>{
   try {
     const preservar = req.query.preservarHistorico === undefined ? true : req.query.preservarHistorico === 'true';
     // BUG CORRIGIDO: buscar usuario_id ANTES de excluir. Antes buscava DEPOIS, e com Excluir TUDO a linha já tinha sumido -> usuário ficava órfão e ativo.
-    const ruAntes = await pool.query('SELECT usuario_id, email FROM responsaveis WHERE id=$1', [req.params.id]);
+    const ruAntes = await pool.query('SELECT usuario_id FROM responsaveis WHERE id=$1', [req.params.id]);
     const usuarioId = ruAntes.rows[0]?.usuario_id;
     const ret = await excluirComOpcaoHistorico({ tabela:'responsaveis', id:req.params.id, preservarHistorico:preservar, tabelasDependentes:[{tabela:'aluno_responsavel',coluna:'responsavel_id'}] });
     if (usuarioId && !preservar) await pool.query('DELETE FROM usuarios WHERE id=$1', [usuarioId]);
