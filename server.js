@@ -131,6 +131,7 @@ async function garantirTabelasFrequencias() {
       );
       ALTER TABLE frequencias ADD COLUMN IF NOT EXISTS justificativa TEXT;
       ALTER TABLE frequencias ADD COLUMN IF NOT EXISTS anexo_url TEXT;
+      ALTER TABLE professores ADD COLUMN IF NOT EXISTS usuario_id INT;
       ALTER TABLE professores ADD COLUMN IF NOT EXISTS telefone VARCHAR(30);
       ALTER TABLE turmas_disciplinas ADD COLUMN IF NOT EXISTS disciplina_id INT REFERENCES disciplinas(id);
       ALTER TABLE turma_disciplina ADD COLUMN IF NOT EXISTS disciplina_id INT REFERENCES disciplinas(id);
@@ -901,7 +902,44 @@ app.get('/api/responsavel/professores', autenticar, exigirPerfil('responsavel'),
 // --- AVISOS ---
 app.get('/api/avisos', autenticar, async (req,res)=>{
   try {
-    const r = await pool.query('SELECT * FROM avisos WHERE ativo IS NULL OR ativo=true ORDER BY created_at DESC');
+    let r;
+    if (req.usuario.perfil === 'admin') {
+      r = await pool.query('SELECT * FROM avisos WHERE ativo IS NULL OR ativo=true ORDER BY created_at DESC');
+    } else if (req.usuario.perfil === 'responsavel') {
+      r = await pool.query(`
+        SELECT DISTINCT a.* FROM avisos a
+        WHERE (a.ativo IS NULL OR a.ativo=true)
+          AND (a.turma_id IS NULL OR EXISTS (
+            SELECT 1 FROM matriculas m
+            JOIN aluno_responsavel ar ON ar.aluno_id=m.aluno_id
+            JOIN responsaveis r ON r.id=ar.responsavel_id
+            WHERE m.turma_id=a.turma_id AND (m.ativo IS NULL OR m.ativo=true)
+              AND r.usuario_id=$1
+          ))
+        ORDER BY a.created_at DESC
+      `, [req.usuario.id]);
+    } else if (req.usuario.perfil === 'professor') {
+      r = await pool.query(`
+        SELECT DISTINCT a.* FROM avisos a
+        WHERE (a.ativo IS NULL OR a.ativo=true)
+          AND (a.turma_id IS NULL OR EXISTS (
+            SELECT 1 FROM turmas_disciplinas td
+            JOIN professores p ON p.id=td.professor_id
+            WHERE td.turma_id=a.turma_id
+              AND (p.usuario_id=$1 OR p.id=$2)
+              AND (p.ativo IS NULL OR p.ativo=true)
+            UNION
+            SELECT 1 FROM turma_disciplina td
+            JOIN professores p ON p.id=td.professor_id
+            WHERE td.turma_id=a.turma_id
+              AND (p.usuario_id=$1 OR p.id=$2)
+              AND (p.ativo IS NULL OR p.ativo=true)
+          ))
+        ORDER BY a.created_at DESC
+      `, [req.usuario.id, req.usuario.professor_id || 0]);
+    } else {
+      r = await pool.query('SELECT * FROM avisos WHERE (ativo IS NULL OR ativo=true) AND turma_id IS NULL ORDER BY created_at DESC');
+    }
     res.json(r.rows);
   } catch(e) {
     console.error('[GET /api/avisos]', e);
@@ -978,7 +1016,12 @@ app.post('/api/avisos', autenticar, exigirPerfil('admin'), async (req,res)=>{
   try{
     const { titulo, mensagem, turma_id } = req.body;
     if(!titulo?.trim() || !mensagem?.trim()) return res.status(400).json({ erro:'Informe título e mensagem do aviso.' });
-    const r = await pool.query('INSERT INTO avisos (titulo,mensagem,turma_id,ativo) VALUES ($1,$2,$3,true) RETURNING *', [titulo.trim(), mensagem.trim(), turma_id||null]);
+    const turmaId = turma_id === undefined || turma_id === null || turma_id === '' ? null : Number(turma_id);
+    if (turmaId !== null && (!Number.isInteger(turmaId) || turmaId < 1)) return res.status(400).json({ erro:'Selecione uma turma válida.' });
+    if (turmaId !== null && !(await pool.query('SELECT 1 FROM turmas WHERE id=$1', [turmaId])).rowCount) {
+      return res.status(400).json({ erro:'A turma selecionada não existe.' });
+    }
+    const r = await pool.query('INSERT INTO avisos (titulo,mensagem,turma_id,ativo) VALUES ($1,$2,$3,true) RETURNING *', [titulo.trim(), mensagem.trim(), turmaId]);
     res.json(r.rows[0]);
   }catch(e){ res.status(400).json({ erro:e.message }); }
 });
@@ -986,7 +1029,12 @@ app.put('/api/avisos/:id', autenticar, exigirPerfil('admin'), async (req,res)=>{
   try{
     const { titulo, mensagem, turma_id } = req.body;
     if(!titulo?.trim() || !mensagem?.trim()) return res.status(400).json({ erro:'Informe título e mensagem do aviso.' });
-    const updated = await pool.query('UPDATE avisos SET titulo=$1, mensagem=$2, turma_id=$3 WHERE id=$4 RETURNING id', [titulo.trim(), mensagem.trim(), turma_id||null, req.params.id]);
+    const turmaId = turma_id === undefined || turma_id === null || turma_id === '' ? null : Number(turma_id);
+    if (turmaId !== null && (!Number.isInteger(turmaId) || turmaId < 1)) return res.status(400).json({ erro:'Selecione uma turma válida.' });
+    if (turmaId !== null && !(await pool.query('SELECT 1 FROM turmas WHERE id=$1', [turmaId])).rowCount) {
+      return res.status(400).json({ erro:'A turma selecionada não existe.' });
+    }
+    const updated = await pool.query('UPDATE avisos SET titulo=$1, mensagem=$2, turma_id=$3 WHERE id=$4 RETURNING id', [titulo.trim(), mensagem.trim(), turmaId, req.params.id]);
     if (!updated.rowCount) return res.status(404).json({ erro:'Aviso não encontrado.' });
     res.json({ mensagem:'Aviso atualizado' });
   }catch(e){ res.status(400).json({ erro:e.message }); }
@@ -994,19 +1042,31 @@ app.put('/api/avisos/:id', autenticar, exigirPerfil('admin'), async (req,res)=>{
 app.get('/api/avisos/destinatarios', autenticar, exigirPerfil('admin'), async (req,res)=>{
   try{
     const [teachers, responsibleRows, orphanResponsibleUsers] = await Promise.all([
-      pool.query("SELECT id, nome, telefone FROM professores WHERE (ativo IS NULL OR ativo=true) ORDER BY nome"),
+      pool.query(`
+        SELECT p.id, p.nome, p.telefone,
+          ARRAY(
+            SELECT DISTINCT classes.turma_id FROM (
+              SELECT turma_id FROM turmas_disciplinas WHERE professor_id=p.id
+              UNION
+              SELECT turma_id FROM turma_disciplina WHERE professor_id=p.id
+            ) classes ORDER BY classes.turma_id
+          ) AS turmas_ids
+        FROM professores p WHERE (p.ativo IS NULL OR p.ativo=true) ORDER BY p.nome
+      `),
       pool.query(`
         SELECT r.id, r.nome, COALESCE(NULLIF(r.telefone, ''), u.telefone) AS telefone,
-               STRING_AGG(DISTINCT a.nome, ', ' ORDER BY a.nome) AS alunos
+               STRING_AGG(DISTINCT a.nome, ', ' ORDER BY a.nome) AS alunos,
+               ARRAY_REMOVE(ARRAY_AGG(DISTINCT m.turma_id), NULL) AS turmas_ids
         FROM responsaveis r
         LEFT JOIN usuarios u ON u.id=r.usuario_id
         LEFT JOIN aluno_responsavel ar ON ar.responsavel_id=r.id
         LEFT JOIN alunos a ON a.id=ar.aluno_id
+        LEFT JOIN matriculas m ON m.aluno_id=a.id AND (m.ativo IS NULL OR m.ativo=true)
         WHERE (r.ativo IS NULL OR r.ativo=true) AND (u.ativo IS NULL OR u.ativo=true)
         GROUP BY r.id, r.nome, r.telefone, u.telefone
       `),
       pool.query(`
-        SELECT u.id, u.nome, u.telefone, NULL::text AS alunos
+        SELECT u.id, u.nome, u.telefone, NULL::text AS alunos, ARRAY[]::int[] AS turmas_ids
         FROM usuarios u
         WHERE u.perfil='responsavel' AND (u.ativo IS NULL OR u.ativo=true)
           AND NOT EXISTS (SELECT 1 FROM responsaveis r WHERE r.usuario_id=u.id)
