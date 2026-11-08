@@ -131,6 +131,7 @@ async function garantirTabelasFrequencias() {
       );
       ALTER TABLE frequencias ADD COLUMN IF NOT EXISTS justificativa TEXT;
       ALTER TABLE frequencias ADD COLUMN IF NOT EXISTS anexo_url TEXT;
+      ALTER TABLE alunos ALTER COLUMN foto_url TYPE TEXT;
       ALTER TABLE professores ADD COLUMN IF NOT EXISTS usuario_id INT;
       ALTER TABLE professores ADD COLUMN IF NOT EXISTS telefone VARCHAR(30);
       ALTER TABLE turmas_disciplinas ADD COLUMN IF NOT EXISTS disciplina_id INT REFERENCES disciplinas(id);
@@ -458,13 +459,58 @@ app.put('/api/alunos/:id', autenticar, exigirPerfil('admin'), async (req,res)=>{
   res.json({ mensagem:'Aluno atualizado' });
 });
 app.put('/api/alunos/:id/foto', autenticar, async (req,res)=>{
-  const { imagem } = req.body;
-  // Salva como base64 ou url - simplificado salva url placeholder
-  await pool.query('UPDATE alunos SET foto_url=$1 WHERE id=$2', ['foto_existe', req.params.id]);
-  res.json({ mensagem:'Foto salva', foto_url:`/api/alunos/${req.params.id}/foto-arquivo` });
+  try {
+    if (!['admin', 'responsavel'].includes(req.usuario.perfil)) {
+      return res.status(403).json({ erro:'Seu perfil não pode alterar a foto do aluno.' });
+    }
+    const { imagem } = req.body;
+    const match = typeof imagem === 'string'
+      ? imagem.match(/^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/]+={0,2})$/)
+      : null;
+    if (!match) return res.status(400).json({ erro:'Envie uma imagem JPEG, PNG ou WEBP válida.' });
+    const bytes = Buffer.from(match[2], 'base64');
+    if (!bytes.length || bytes.length > 10 * 1024 * 1024) {
+      return res.status(400).json({ erro:'A imagem deve ter no máximo 10 MB.' });
+    }
+    if (req.usuario.perfil === 'responsavel') {
+      const linked = await pool.query(`
+        SELECT 1 FROM aluno_responsavel ar
+        JOIN responsaveis r ON r.id=ar.responsavel_id
+        WHERE ar.aluno_id=$1 AND r.usuario_id=$2
+      `, [req.params.id, req.usuario.id]);
+      if (!linked.rowCount) return res.status(403).json({ erro:'Este aluno não está vinculado ao seu acesso.' });
+    }
+    const updated = await pool.query('UPDATE alunos SET foto_url=$1 WHERE id=$2 RETURNING id', [imagem, req.params.id]);
+    if (!updated.rowCount) return res.status(404).json({ erro:'Aluno não encontrado.' });
+    res.json({ mensagem:'Foto salva.', foto_url:`/api/alunos/${req.params.id}/foto-arquivo` });
+  } catch(e) {
+    console.error('[PUT /api/alunos/:id/foto]', e);
+    res.status(500).json({ erro:'Não foi possível salvar a foto do aluno.' });
+  }
 });
 app.get('/api/alunos/:id/foto-arquivo', autenticar, async (req,res)=>{
-  res.status(404).json({ erro:'Implementar storage de foto se necessário' });
+  try {
+    if (!['admin', 'responsavel'].includes(req.usuario.perfil)) {
+      return res.status(403).json({ erro:'Seu perfil não pode consultar a foto do aluno.' });
+    }
+    if (req.usuario.perfil === 'responsavel') {
+      const linked = await pool.query(`
+        SELECT 1 FROM aluno_responsavel ar
+        JOIN responsaveis r ON r.id=ar.responsavel_id
+        WHERE ar.aluno_id=$1 AND r.usuario_id=$2
+      `, [req.params.id, req.usuario.id]);
+      if (!linked.rowCount) return res.status(403).json({ erro:'Este aluno não está vinculado ao seu acesso.' });
+    }
+    const result = await pool.query('SELECT foto_url FROM alunos WHERE id=$1', [req.params.id]);
+    const match = result.rows[0]?.foto_url?.match(/^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/]+={0,2})$/);
+    if (!match) return res.status(404).json({ erro:'Foto do aluno não encontrada.' });
+    res.setHeader('Content-Type', match[1]);
+    res.setHeader('Cache-Control', 'private, max-age=300');
+    res.send(Buffer.from(match[2], 'base64'));
+  } catch(e) {
+    console.error('[GET /api/alunos/:id/foto-arquivo]', e);
+    res.status(500).json({ erro:'Não foi possível carregar a foto do aluno.' });
+  }
 });
 app.delete('/api/alunos/:id', autenticar, exigirPerfil('admin'), async (req,res)=>{
   try {
@@ -785,8 +831,8 @@ app.get('/api/faltas/turmas/:id/alunos', autenticar, async (req,res)=>{
     const turmaId = vinculo.rows[0].turma_id;
     const r = await pool.query(`
       SELECT DISTINCT a.id, a.nome, a.matricula,
-             (SELECT json_agg(json_build_object('id', r.id, 'nome', r.nome, 'telefone', r.telefone)
-              ) FROM responsaveis r JOIN aluno_responsavel ar ON ar.responsavel_id=r.id WHERE ar.aluno_id=a.id) as responsaveis,
+             (SELECT jsonb_agg(jsonb_build_object('id', r.id, 'nome', r.nome, 'telefone', r.telefone))
+              FROM responsaveis r JOIN aluno_responsavel ar ON ar.responsavel_id=r.id WHERE ar.aluno_id=a.id) as responsaveis,
              f.presente, f.detalhes
       FROM alunos a
       JOIN matriculas m ON m.aluno_id=a.id AND m.turma_id=$2 AND (m.ativo IS NULL OR m.ativo=true)
@@ -880,8 +926,35 @@ app.put('/api/perfil/foto', autenticar, async (req,res)=>{
 
 // --- RESPONSAVEL / FILHOS ---
 app.get('/api/responsavel/filhos', autenticar, exigirPerfil('responsavel'), async (req,res)=>{
-  const r = await pool.query(`SELECT a.*, t.nome as turma FROM alunos a LEFT JOIN matriculas m ON m.aluno_id=a.id AND (m.ativo IS NULL OR m.ativo=true) LEFT JOIN turmas t ON t.id=m.turma_id WHERE a.id IN (SELECT ar.aluno_id FROM aluno_responsavel ar JOIN responsaveis rr ON rr.id=ar.responsavel_id WHERE rr.usuario_id=$1)`, [req.usuario.id]);
-  res.json(r.rows);
+  try {
+    const r = await pool.query(`
+      SELECT a.id, a.nome, a.matricula, a.data_nascimento, a.ativo, a.created_at,
+             CASE WHEN a.foto_url LIKE 'data:image/%'
+               THEN '/api/alunos/' || a.id || '/foto-arquivo'
+               ELSE NULL
+             END AS foto_url,
+             enrollment.turma_id, t.nome AS turma, t.ano_letivo
+      FROM alunos a
+      LEFT JOIN LATERAL (
+        SELECT m.turma_id
+        FROM matriculas m
+        WHERE m.aluno_id=a.id AND (m.ativo IS NULL OR m.ativo=true)
+        ORDER BY m.id DESC
+        LIMIT 1
+      ) enrollment ON true
+      LEFT JOIN turmas t ON t.id=enrollment.turma_id
+      WHERE a.id IN (
+        SELECT ar.aluno_id FROM aluno_responsavel ar
+        JOIN responsaveis rr ON rr.id=ar.responsavel_id
+        WHERE rr.usuario_id=$1
+      )
+      ORDER BY a.nome
+    `, [req.usuario.id]);
+    res.json(r.rows);
+  } catch(e) {
+    console.error('[GET /api/responsavel/filhos]', e);
+    res.status(500).json({ erro:'Não foi possível carregar os alunos vinculados.' });
+  }
 });
 app.get('/api/responsavel/professores', autenticar, exigirPerfil('responsavel'), async (req,res)=>{
   try {
@@ -1079,6 +1152,43 @@ app.get('/api/avisos/destinatarios', autenticar, exigirPerfil('admin'), async (r
       responsaveis
     });
   }catch(e){ console.error('[GET /avisos/destinatarios]', e); res.status(500).json({ erro:'Não foi possível carregar os destinatários do aviso.' }); }
+});
+app.post('/api/professor/avisos', autenticar, exigirPerfil('professor'), async (req,res)=>{
+  try {
+    const { titulo, mensagem, turma_id, disciplina_id } = req.body;
+    const turmaId = Number(turma_id);
+    const disciplinaId = Number(disciplina_id);
+    if (!titulo?.trim() || !mensagem?.trim()) {
+      return res.status(400).json({ erro:'Informe o título e a mensagem do aviso.' });
+    }
+    if (titulo.trim().length > 200) return res.status(400).json({ erro:'O título pode ter no máximo 200 caracteres.' });
+    if (!Number.isInteger(turmaId) || turmaId < 1 || !Number.isInteger(disciplinaId) || disciplinaId < 1) {
+      return res.status(400).json({ erro:'Selecione uma turma e disciplina válidas.' });
+    }
+    const teacher = await pool.query(
+      'SELECT id FROM professores WHERE usuario_id=$1 AND (ativo IS NULL OR ativo=true)',
+      [req.usuario.id]
+    );
+    if (!teacher.rowCount) return res.status(403).json({ erro:'Não foi encontrado um cadastro ativo para este professor.' });
+    const assignment = await pool.query(`
+      SELECT 1 FROM turmas_disciplinas
+      WHERE turma_id=$1 AND disciplina_id=$2 AND professor_id=$3
+      UNION
+      SELECT 1 FROM turma_disciplina
+      WHERE turma_id=$1 AND disciplina_id=$2 AND professor_id=$3
+      LIMIT 1
+    `, [turmaId, disciplinaId, teacher.rows[0].id]);
+    if (!assignment.rowCount) return res.status(403).json({ erro:'Esta turma e disciplina não estão vinculadas a este professor.' });
+    const notice = await pool.query(`
+      INSERT INTO avisos (titulo, mensagem, turma_id, ativo)
+      VALUES ($1, $2, $3, true)
+      RETURNING *
+    `, [titulo.trim(), mensagem.trim(), turmaId]);
+    res.status(201).json(notice.rows[0]);
+  } catch(e) {
+    console.error('[POST /api/professor/avisos]', e);
+    res.status(500).json({ erro:'Não foi possível publicar o aviso no app.' });
+  }
 });
 app.get('/api/professor/avisos/destinatarios', autenticar, exigirPerfil('professor'), async (req,res)=>{
   try{
