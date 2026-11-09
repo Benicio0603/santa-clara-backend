@@ -85,6 +85,18 @@ async function garantirTabelasFrequencias() {
         senha TEXT, senha_hash TEXT, perfil VARCHAR(30), telefone VARCHAR(30),
         foto_url TEXT, ativo BOOLEAN DEFAULT true, professor_id INT, responsavel_id INT, created_at TIMESTAMPTZ DEFAULT NOW()
       );
+      ALTER TABLE alunos ADD COLUMN IF NOT EXISTS matricula VARCHAR(30);
+      ALTER TABLE alunos ADD COLUMN IF NOT EXISTS data_nascimento DATE;
+      ALTER TABLE alunos ADD COLUMN IF NOT EXISTS foto_url TEXT;
+      ALTER TABLE alunos ADD COLUMN IF NOT EXISTS ativo BOOLEAN DEFAULT true;
+      ALTER TABLE alunos ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
+      ALTER TABLE turmas ADD COLUMN IF NOT EXISTS ano_letivo INT DEFAULT 2027;
+      ALTER TABLE turmas ADD COLUMN IF NOT EXISTS ativo BOOLEAN DEFAULT true;
+      ALTER TABLE matriculas ADD COLUMN IF NOT EXISTS ativo BOOLEAN DEFAULT true;
+      ALTER TABLE responsaveis ADD COLUMN IF NOT EXISTS telefone VARCHAR(30);
+      ALTER TABLE responsaveis ADD COLUMN IF NOT EXISTS usuario_id INT;
+      ALTER TABLE responsaveis ADD COLUMN IF NOT EXISTS parentesco VARCHAR(50) DEFAULT 'Responsável';
+      ALTER TABLE responsaveis ADD COLUMN IF NOT EXISTS ativo BOOLEAN DEFAULT true;
       ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS professor_id INT;
       ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS responsavel_id INT;
       CREATE TABLE IF NOT EXISTS responsaveis (
@@ -176,7 +188,7 @@ function formatarTelefone(value) {
 }
 
 // SAUDE
-app.get('/api/versao', (req,res)=> res.json({ versao:'PRODUCAO-V2-2026-11-07', notas: true, professores_whatsapp: true, login_filho: true }));
+app.get('/api/versao', (req,res)=> res.json({ versao:'PRODUCAO-V3-2026-11-09', notas: true, avisos_responsavel: true, matricula_responsavel: true, professores_whatsapp: true, login_filho: true }));
 app.get('/api/saude', async (req,res)=>{
   try { await pool.query('SELECT 1'); res.json({status:'conectado', banco:'postgres'}); }
   catch(e){ res.json({status:'erro', erro:e.message}); }
@@ -807,18 +819,50 @@ app.get('/api/matriculas', autenticar, exigirPerfil('admin'), async (req,res)=>{
   res.json(r.rows);
 });
 app.post('/api/matriculas', autenticar, exigirPerfil('admin'), async (req,res)=>{
+  const client = await pool.connect();
   try{
     const { aluno_id, turma_id } = req.body;
     if(!aluno_id || !turma_id) return res.status(400).json({ erro:'Selecione o aluno e a turma.' });
-    const ex = await pool.query('SELECT id FROM matriculas WHERE aluno_id=$1 AND turma_id=$2 LIMIT 1', [aluno_id, turma_id]);
-    if(ex.rows.length){ await pool.query('UPDATE matriculas SET ativo=true WHERE id=$1', [ex.rows[0].id]); return res.json({ mensagem:'Aluno já estava matriculado - matrícula reativada.' }); }
-    await pool.query('INSERT INTO matriculas (aluno_id,turma_id,ativo) VALUES ($1,$2,true)', [aluno_id, turma_id]);
+    await client.query('BEGIN');
+    const ex = await client.query('SELECT id FROM matriculas WHERE aluno_id=$1 AND turma_id=$2 LIMIT 1', [aluno_id, turma_id]);
+    if(ex.rows.length){
+      await client.query('UPDATE matriculas SET ativo=false WHERE aluno_id=$1 AND id<>$2', [aluno_id, ex.rows[0].id]);
+      await client.query('UPDATE matriculas SET ativo=true WHERE id=$1', [ex.rows[0].id]);
+      await client.query('COMMIT');
+      return res.json({ mensagem:'Matrícula reativada; as demais matrículas do aluno foram inativadas.' });
+    }
+    await client.query('UPDATE matriculas SET ativo=false WHERE aluno_id=$1 AND (ativo IS NULL OR ativo=true)', [aluno_id]);
+    await client.query('INSERT INTO matriculas (aluno_id,turma_id,ativo) VALUES ($1,$2,true)', [aluno_id, turma_id]);
+    await client.query('COMMIT');
     res.json({ mensagem:'Matrícula salva' });
-  }catch(e){ console.error('[POST /matriculas]', e); res.status(400).json({ erro:e.message }); }
+  }catch(e){ await client.query('ROLLBACK'); console.error('[POST /matriculas]', e); res.status(400).json({ erro:e.message }); }
+  finally { client.release(); }
 });
 app.put('/api/matriculas/:id', autenticar, exigirPerfil('admin'), async (req,res)=>{
-  await pool.query('UPDATE matriculas SET aluno_id=$1,turma_id=$2 WHERE id=$3', [req.body.aluno_id, req.body.turma_id, req.params.id]);
-  res.json({ mensagem:'Matrícula atualizada' });
+  const client = await pool.connect();
+  try {
+    const { aluno_id, turma_id } = req.body;
+    if(!aluno_id || !turma_id) return res.status(400).json({ erro:'Selecione o aluno e a turma.' });
+    await client.query('BEGIN');
+    await client.query(
+      'UPDATE matriculas SET ativo=false WHERE aluno_id=$1 AND id<>$2 AND (ativo IS NULL OR ativo=true)',
+      [aluno_id, req.params.id]
+    );
+    const updated = await client.query(
+      'UPDATE matriculas SET aluno_id=$1,turma_id=$2,ativo=true WHERE id=$3 RETURNING id',
+      [aluno_id, turma_id, req.params.id]
+    );
+    if (!updated.rowCount) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ erro:'Matrícula não encontrada.' });
+    }
+    await client.query('COMMIT');
+    res.json({ mensagem:'Matrícula atualizada; as demais matrículas do aluno foram inativadas.' });
+  } catch(e) {
+    await client.query('ROLLBACK');
+    console.error('[PUT /matriculas/:id]', e);
+    res.status(400).json({ erro:e.message });
+  } finally { client.release(); }
 });
 app.delete('/api/matriculas/:id', autenticar, exigirPerfil('admin'), async (req,res)=>{
   const preservar = req.query.preservarHistorico === undefined ? true : req.query.preservarHistorico === 'true';
@@ -959,7 +1003,9 @@ app.get('/api/responsavel/filhos', autenticar, exigirPerfil('responsavel'), asyn
       WHERE a.id IN (
         SELECT ar.aluno_id FROM aluno_responsavel ar
         JOIN responsaveis rr ON rr.id=ar.responsavel_id
-        WHERE rr.usuario_id=$1
+        WHERE rr.usuario_id=$1 OR rr.id=(
+          SELECT u.responsavel_id FROM usuarios u WHERE u.id=$1
+        )
       )
       ORDER BY a.nome
     `, [req.usuario.id]);
@@ -1002,12 +1048,16 @@ app.get('/api/avisos', autenticar, async (req,res)=>{
             JOIN aluno_responsavel ar ON ar.aluno_id=m.aluno_id
             JOIN responsaveis r ON r.id=ar.responsavel_id
             WHERE m.turma_id=a.turma_id AND (m.ativo IS NULL OR m.ativo=true)
-              AND r.usuario_id=$1
+              AND (r.usuario_id=$1 OR r.id=(
+                SELECT u.responsavel_id FROM usuarios u WHERE u.id=$1
+              ))
             )
             OR EXISTS (
               SELECT 1 FROM aluno_responsavel ar
               JOIN responsaveis r ON r.id=ar.responsavel_id
-              WHERE ar.aluno_id=a.aluno_id AND r.usuario_id=$1
+              WHERE ar.aluno_id=a.aluno_id AND (r.usuario_id=$1 OR r.id=(
+                SELECT u.responsavel_id FROM usuarios u WHERE u.id=$1
+              ))
             )
           )
         ORDER BY a.created_at DESC
@@ -1358,8 +1408,15 @@ app.get('/api/notas', autenticar, async (req,res)=>{
     if(turma_id){ q+=` AND n.turma_id=$${i++}`; vals.push(turma_id); }
     if(disciplina_id){ q+=` AND n.disciplina_id=$${i++}`; vals.push(disciplina_id); }
     if (req.usuario.perfil === 'responsavel') {
-      q += ` AND n.aluno_id IN (SELECT ar.aluno_id FROM aluno_responsavel ar JOIN responsaveis r ON r.id=ar.responsavel_id WHERE r.usuario_id=$${i++})`;
+      q += ` AND n.aluno_id IN (
+        SELECT ar.aluno_id FROM aluno_responsavel ar
+        JOIN responsaveis r ON r.id=ar.responsavel_id
+        WHERE r.usuario_id=$${i} OR r.id=(
+          SELECT u.responsavel_id FROM usuarios u WHERE u.id=$${i}
+        )
+      )`;
       vals.push(req.usuario.id);
+      i++;
     } else if (req.usuario.perfil === 'professor') {
       q += ` AND n.professor_id=(SELECT id FROM professores WHERE usuario_id=$${i++} LIMIT 1)`;
       vals.push(req.usuario.id);
