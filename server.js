@@ -85,22 +85,6 @@ async function garantirTabelasFrequencias() {
         senha TEXT, senha_hash TEXT, perfil VARCHAR(30), telefone VARCHAR(30),
         foto_url TEXT, ativo BOOLEAN DEFAULT true, professor_id INT, responsavel_id INT, created_at TIMESTAMPTZ DEFAULT NOW()
       );
-      ALTER TABLE alunos ADD COLUMN IF NOT EXISTS matricula VARCHAR(30);
-      ALTER TABLE alunos ADD COLUMN IF NOT EXISTS data_nascimento DATE;
-      ALTER TABLE alunos ADD COLUMN IF NOT EXISTS foto_url TEXT;
-      ALTER TABLE alunos ADD COLUMN IF NOT EXISTS ativo BOOLEAN DEFAULT true;
-      ALTER TABLE alunos ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
-      ALTER TABLE turmas ADD COLUMN IF NOT EXISTS ano_letivo INT DEFAULT 2027;
-      ALTER TABLE turmas ADD COLUMN IF NOT EXISTS ativo BOOLEAN DEFAULT true;
-      ALTER TABLE matriculas ADD COLUMN IF NOT EXISTS ativo BOOLEAN DEFAULT true;
-      ALTER TABLE responsaveis ADD COLUMN IF NOT EXISTS telefone VARCHAR(30);
-      ALTER TABLE responsaveis ADD COLUMN IF NOT EXISTS usuario_id INT;
-      ALTER TABLE responsaveis ADD COLUMN IF NOT EXISTS parentesco VARCHAR(50) DEFAULT 'Responsável';
-      ALTER TABLE responsaveis ADD COLUMN IF NOT EXISTS ativo BOOLEAN DEFAULT true;
-      ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS professor_id INT;
-      ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS responsavel_id INT;
-      ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS foto_url TEXT;
-      ALTER TABLE usuarios ALTER COLUMN foto_url TYPE TEXT;
       CREATE TABLE IF NOT EXISTS responsaveis (
         id SERIAL PRIMARY KEY, nome VARCHAR(150) NOT NULL, email VARCHAR(150) UNIQUE,
         telefone VARCHAR(30), usuario_id INT, parentesco VARCHAR(50) DEFAULT 'Responsável', ativo BOOLEAN DEFAULT true
@@ -117,6 +101,22 @@ async function garantirTabelasFrequencias() {
       CREATE TABLE IF NOT EXISTS matriculas (
         id SERIAL PRIMARY KEY, aluno_id INT REFERENCES alunos(id), turma_id INT REFERENCES turmas(id), ativo BOOLEAN DEFAULT true, UNIQUE(aluno_id, turma_id)
       );
+      ALTER TABLE alunos ADD COLUMN IF NOT EXISTS matricula VARCHAR(30);
+      ALTER TABLE alunos ADD COLUMN IF NOT EXISTS data_nascimento DATE;
+      ALTER TABLE alunos ADD COLUMN IF NOT EXISTS foto_url TEXT;
+      ALTER TABLE alunos ADD COLUMN IF NOT EXISTS ativo BOOLEAN DEFAULT true;
+      ALTER TABLE alunos ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
+      ALTER TABLE turmas ADD COLUMN IF NOT EXISTS ano_letivo INT DEFAULT 2027;
+      ALTER TABLE turmas ADD COLUMN IF NOT EXISTS ativo BOOLEAN DEFAULT true;
+      ALTER TABLE matriculas ADD COLUMN IF NOT EXISTS ativo BOOLEAN DEFAULT true;
+      ALTER TABLE responsaveis ADD COLUMN IF NOT EXISTS telefone VARCHAR(30);
+      ALTER TABLE responsaveis ADD COLUMN IF NOT EXISTS usuario_id INT;
+      ALTER TABLE responsaveis ADD COLUMN IF NOT EXISTS parentesco VARCHAR(50) DEFAULT 'Responsável';
+      ALTER TABLE responsaveis ADD COLUMN IF NOT EXISTS ativo BOOLEAN DEFAULT true;
+      ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS professor_id INT;
+      ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS responsavel_id INT;
+      ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS foto_url TEXT;
+      ALTER TABLE usuarios ALTER COLUMN foto_url TYPE TEXT;
       CREATE TABLE IF NOT EXISTS frequencias (
         id SERIAL PRIMARY KEY, turma_disciplina_id INT, turma_disciplina_tipo VARCHAR(32),
         aluno_id INT, data DATE, presente BOOLEAN DEFAULT true, detalhes TEXT,
@@ -208,7 +208,7 @@ function parseAttendanceAssignment(value) {
 }
 
 // SAUDE
-app.get('/api/versao', (req,res)=> res.json({ versao:'PRODUCAO-V4-2026-11-09', notas: true, avisos_responsavel: true, frequencia: true, foto_perfil: true, matricula_responsavel: true, professores_whatsapp: true, login_filho: true }));
+app.get('/api/versao', (req,res)=> res.json({ versao:'PRODUCAO-V5-2026-11-09', notas: true, avisos_responsavel: true, frequencia: true, foto_perfil: true, matricula_responsavel: true, professores_whatsapp: true, login_filho: true }));
 app.get('/api/saude', async (req,res)=>{
   try { await pool.query('SELECT 1'); res.json({status:'conectado', banco:'postgres'}); }
   catch(e){ res.json({status:'erro', erro:e.message}); }
@@ -943,8 +943,12 @@ app.post('/api/faltas/chamada', autenticar, async (req,res)=>{
   if (!['admin', 'professor'].includes(req.usuario.perfil)) return res.status(403).json({ erro:'Seu perfil não pode registrar frequência.' });
   const { turma_disciplina_id, data, registros } = req.body || {};
   const assignment = parseAttendanceAssignment(turma_disciplina_id);
+  const parsedDate = typeof data === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(data)
+    ? new Date(`${data}T00:00:00.000Z`)
+    : null;
   if (!assignment ||
-      typeof data !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(data) || !Array.isArray(registros)) {
+      !parsedDate || Number.isNaN(parsedDate.getTime()) || parsedDate.toISOString().slice(0, 10) !== data ||
+      !Array.isArray(registros) || registros.length === 0) {
     return res.status(400).json({ erro:'Informe turma, data e lista de alunos válidas.' });
   }
   const studentIds = registros.map((reg) => Number(reg?.aluno_id));
