@@ -157,6 +157,27 @@ async function garantirTabelasFrequencias() {
       ALTER TABLE frequencias ADD COLUMN IF NOT EXISTS detalhes TEXT;
       ALTER TABLE frequencias ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
       DO $$
+      DECLARE legacy_assignment_fk RECORD;
+      BEGIN
+        FOR legacy_assignment_fk IN
+          SELECT c.conname
+          FROM pg_constraint c
+          JOIN pg_class t ON t.oid=c.conrelid
+          JOIN pg_namespace n ON n.oid=t.relnamespace
+          WHERE c.contype='f'
+            AND t.relname='frequencias'
+            AND n.nspname=current_schema()
+            AND EXISTS (
+              SELECT 1
+              FROM unnest(c.conkey) AS key_column(attnum)
+              JOIN pg_attribute a ON a.attrelid=t.oid AND a.attnum=key_column.attnum
+              WHERE a.attname='turma_disciplina_id'
+            )
+        LOOP
+          EXECUTE format('ALTER TABLE %I.frequencias DROP CONSTRAINT %I', current_schema(), legacy_assignment_fk.conname);
+        END LOOP;
+      END $$;
+      DO $$
       DECLARE legacy_unique RECORD;
       BEGIN
         FOR legacy_unique IN
@@ -227,7 +248,7 @@ function parseAttendanceAssignment(value) {
 }
 
 // SAUDE
-app.get('/api/versao', (req,res)=> res.json({ versao:'PRODUCAO-V6-2026-11-09', notas: true, avisos_responsavel: true, frequencia: true, foto_perfil: true, matricula_responsavel: true, professores_whatsapp: true, login_filho: true }));
+app.get('/api/versao', (req,res)=> res.json({ versao:'PRODUCAO-V7-2026-11-09', notas: true, avisos_responsavel: true, frequencia: true, foto_perfil: true, matricula_responsavel: true, professores_whatsapp: true, login_filho: true }));
 app.get('/api/saude', async (req,res)=>{
   try { await pool.query('SELECT 1'); res.json({status:'conectado', banco:'postgres'}); }
   catch(e){ res.json({status:'erro', erro:e.message}); }
@@ -1027,9 +1048,17 @@ app.post('/api/faltas/chamada', autenticar, async (req,res)=>{
     res.json({ mensagem:`Chamada salva para ${data}`, faltas });
   } catch(e) {
     await client.query('ROLLBACK');
-    console.error('[POST /api/faltas/chamada]', e);
+    console.error('[POST /api/faltas/chamada]', {
+      code:e.code,
+      constraint:e.constraint,
+      detail:e.detail
+    }, e);
     const message = {
-      '23503': 'Não foi possível salvar: a turma, disciplina ou aluno não existe mais. Atualize a tela e tente novamente.',
+      '23503': e.constraint?.includes('aluno')
+        ? 'Não foi possível salvar: um dos alunos não existe mais. Atualize a chamada e tente novamente.'
+        : e.constraint?.includes('turma_disciplina_id')
+          ? 'O banco ainda tem uma restrição antiga na chamada. Reinicie o backend para aplicar a migração de frequência.'
+          : 'Não foi possível salvar por uma inconsistência de vínculo no banco. Atualize a tela e tente novamente.',
       '23505': 'Já existe uma chamada para esta turma, aluno e data. Atualize a tela e tente novamente.',
       '42703': 'O banco ainda não tem todas as colunas da frequência. Verifique se a versão mais recente do backend iniciou corretamente.',
       '42P01': 'A tabela de frequência não foi inicializada. Verifique os logs de inicialização do backend.'
