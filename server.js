@@ -248,7 +248,7 @@ function parseAttendanceAssignment(value) {
 }
 
 // SAUDE
-app.get('/api/versao', (req,res)=> res.json({ versao:'PRODUCAO-V7-2026-11-09', notas: true, avisos_responsavel: true, frequencia: true, foto_perfil: true, matricula_responsavel: true, professores_whatsapp: true, login_filho: true }));
+app.get('/api/versao', (req,res)=> res.json({ versao:'PRODUCAO-V8-2026-11-09', notas: true, avisos_responsavel: true, frequencia: true, foto_perfil: true, matricula_responsavel: true, professores_whatsapp: true, login_filho: true, relatorios: true }));
 app.get('/api/saude', async (req,res)=>{
   try { await pool.query('SELECT 1'); res.json({status:'conectado', banco:'postgres'}); }
   catch(e){ res.json({status:'erro', erro:e.message}); }
@@ -933,6 +933,68 @@ app.delete('/api/matriculas/:id', autenticar, exigirPerfil('admin'), async (req,
   res.json({ mensagem:'Matrícula excluída permanentemente' });
 });
 
+app.get('/api/relatorios/vinculos', autenticar, exigirPerfil('admin'), async (req,res)=>{
+  try {
+    const report = await pool.query(`
+      WITH vinculos AS (
+        SELECT turma_id, disciplina_id, professor_id FROM turmas_disciplinas
+        UNION
+        SELECT turma_id, disciplina_id, professor_id FROM turma_disciplina
+      )
+      SELECT a.matricula, a.nome AS aluno, t.nome AS turma, p.nome AS professor,
+             d.nome AS disciplina, COALESCE(string_agg(DISTINCT r.nome, ', ' ORDER BY r.nome), '') AS responsavel
+      FROM matriculas m
+      JOIN alunos a ON a.id=m.aluno_id AND (a.ativo IS NULL OR a.ativo=true)
+      JOIN turmas t ON t.id=m.turma_id AND (t.ativo IS NULL OR t.ativo=true)
+      LEFT JOIN vinculos v ON v.turma_id=m.turma_id
+      LEFT JOIN professores p ON p.id=v.professor_id
+      LEFT JOIN disciplinas d ON d.id=v.disciplina_id
+      LEFT JOIN aluno_responsavel ar ON ar.aluno_id=a.id
+      LEFT JOIN responsaveis r ON r.id=ar.responsavel_id AND (r.ativo IS NULL OR r.ativo=true)
+      WHERE m.ativo IS NULL OR m.ativo=true
+      GROUP BY a.id, a.matricula, a.nome, t.nome, p.nome, d.nome
+      ORDER BY t.nome, a.nome, d.nome, p.nome
+    `);
+    res.json(report.rows);
+  } catch(e) {
+    console.error('[GET /api/relatorios/vinculos]', e);
+    res.status(500).json({ erro:'Não foi possível gerar o relatório de vínculos.' });
+  }
+});
+
+app.get('/api/relatorios/frequencia', autenticar, exigirPerfil('admin'), async (req,res)=>{
+  try {
+    const report = await pool.query(`
+      SELECT a.matricula, a.nome AS aluno, t.nome AS turma, d.nome AS disciplina,
+             p.nome AS professor, f.data, f.presente, f.detalhes, f.justificativa
+      FROM frequencias f
+      JOIN alunos a ON a.id=f.aluno_id
+      JOIN LATERAL (
+        SELECT links.turma_id, links.disciplina_id, links.professor_id
+        FROM (
+          SELECT id, turma_id, disciplina_id, professor_id, 'turmas_disciplinas'::text AS tipo FROM turmas_disciplinas
+          UNION ALL
+          SELECT id, turma_id, disciplina_id, professor_id, 'turma_disciplina'::text AS tipo FROM turma_disciplina
+        ) links
+        WHERE links.id=f.turma_disciplina_id
+          AND (f.turma_disciplina_tipo=links.tipo OR f.turma_disciplina_tipo IS NULL)
+        ORDER BY CASE WHEN f.turma_disciplina_tipo=links.tipo THEN 0 ELSE 1 END, links.tipo
+        LIMIT 1
+      ) td ON true
+      JOIN turmas t ON t.id=td.turma_id
+      LEFT JOIN disciplinas d ON d.id=td.disciplina_id
+      LEFT JOIN professores p ON p.id=td.professor_id
+      JOIN matriculas m ON m.aluno_id=a.id AND m.turma_id=t.id AND (m.ativo IS NULL OR m.ativo=true)
+      WHERE a.ativo IS NULL OR a.ativo=true
+      ORDER BY t.nome, a.nome, f.data DESC, d.nome, p.nome
+    `);
+    res.json(report.rows);
+  } catch(e) {
+    console.error('[GET /api/relatorios/frequencia]', e);
+    res.status(500).json({ erro:'Não foi possível gerar o relatório de presença.' });
+  }
+});
+
 // --- FALTAS / FREQUENCIA - FIX DISTINCT ---
 app.get('/api/faltas/turmas/:id/alunos', autenticar, async (req,res)=>{
   const assignment = parseAttendanceAssignment(req.params.id);
@@ -1069,6 +1131,7 @@ app.post('/api/faltas/chamada', autenticar, async (req,res)=>{
 app.get('/api/faltas/aluno/:id', autenticar, async (req,res)=>{
   if (!['admin', 'professor', 'responsavel'].includes(req.usuario.perfil)) return res.status(403).json({ erro:'Seu perfil não pode consultar frequência.' });
   try {
+    const incluirPresencas = req.query.incluirPresencas === 'true';
     if (req.usuario.perfil === 'responsavel') {
       const linked = await pool.query(`SELECT 1 FROM aluno_responsavel ar
         JOIN responsaveis r ON r.id=ar.responsavel_id
@@ -1106,15 +1169,16 @@ app.get('/api/faltas/aluno/:id', autenticar, async (req,res)=>{
     LEFT JOIN turmas t ON t.id=td.turma_id
     LEFT JOIN disciplinas d ON d.id=td.disciplina_id
     LEFT JOIN professores p ON p.id=td.professor_id
-    WHERE f.aluno_id=$1 AND f.presente=false
+    WHERE f.aluno_id=$1 AND ($2::boolean=true OR f.presente=false)
     ORDER BY f.data DESC
-    `, [req.params.id]);
-    const total = r.rows.length;
-    for (const row of r.rows) {
+    `, [req.params.id, incluirPresencas]);
+    const registros = r.rows;
+    const faltas = registros.filter((row) => row.presente === false);
+    for (const row of faltas) {
       const j = await pool.query('SELECT id, nome_original FROM justificativas WHERE falta_id=$1', [row.id]);
       row.justificativas = j.rows;
     }
-    res.json({ total, faltas: r.rows });
+    res.json({ total: faltas.length, faltas, registros });
   } catch(e) {
     console.error('[GET /api/faltas/aluno/:id]', e);
     res.status(500).json({ erro:'Não foi possível carregar as faltas do aluno.' });
