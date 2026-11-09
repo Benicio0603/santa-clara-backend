@@ -107,11 +107,13 @@ async function garantirTabelasFrequencias() {
         id SERIAL PRIMARY KEY, turma_disciplina_id INT, aluno_id INT, data DATE, presente BOOLEAN DEFAULT true, detalhes TEXT, created_at TIMESTAMPTZ DEFAULT NOW(), UNIQUE(turma_disciplina_id, aluno_id, data)
       );
       CREATE TABLE IF NOT EXISTS avisos (
-        id SERIAL PRIMARY KEY, titulo VARCHAR(200), mensagem TEXT, turma_id INT, created_at TIMESTAMPTZ DEFAULT NOW(), ativo BOOLEAN DEFAULT true
+        id SERIAL PRIMARY KEY, titulo VARCHAR(200), mensagem TEXT, turma_id INT, aluno_id INT,
+        created_at TIMESTAMPTZ DEFAULT NOW(), ativo BOOLEAN DEFAULT true
       );
       ALTER TABLE avisos ADD COLUMN IF NOT EXISTS titulo VARCHAR(200);
       ALTER TABLE avisos ADD COLUMN IF NOT EXISTS mensagem TEXT;
       ALTER TABLE avisos ADD COLUMN IF NOT EXISTS turma_id INT;
+      ALTER TABLE avisos ADD COLUMN IF NOT EXISTS aluno_id INT;
       ALTER TABLE avisos ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
       ALTER TABLE avisos ADD COLUMN IF NOT EXISTS ativo BOOLEAN DEFAULT true;
       CREATE TABLE IF NOT EXISTS notas (
@@ -442,10 +444,20 @@ app.delete('/api/professores/:id', autenticar, exigirPerfil('admin'), async (req
 // --- ALUNOS ---
 app.get('/api/alunos', autenticar, exigirPerfil('admin'), async (req,res)=>{
   try {
-    if (req.query.incluirInativas === 'true') { const r = await pool.query('SELECT * FROM alunos ORDER BY nome'); return res.json(r.rows); }
-    const r = await pool.query('SELECT * FROM alunos WHERE ativo IS NULL OR ativo=true ORDER BY nome');
+    const activeFilter = req.query.incluirInativas === 'true' ? '' : 'WHERE a.ativo IS NULL OR a.ativo=true';
+    const r = await pool.query(`
+      SELECT a.*,
+        ARRAY(
+          SELECT DISTINCT m.turma_id FROM matriculas m
+          WHERE m.aluno_id=a.id AND (m.ativo IS NULL OR m.ativo=true)
+          ORDER BY m.turma_id
+        ) AS turmas_ids
+      FROM alunos a
+      ${activeFilter}
+      ORDER BY a.nome
+    `);
     res.json(r.rows);
-  } catch(e){ console.error('GET alunos', e); res.json([]); }
+  } catch(e){ console.error('GET alunos', e); res.status(500).json({ erro:'Não foi possível carregar os alunos.' }); }
 });
 app.post('/api/alunos/:id/reativar', autenticar, exigirPerfil('admin'), async (req,res)=>{ try { await pool.query('UPDATE alunos SET ativo=true WHERE id=$1', [req.params.id]); res.json({ mensagem: 'Aluno reativado!' }); } catch(e){ res.status(400).json({ erro: e.message }); } });
 app.post('/api/alunos', autenticar, exigirPerfil('admin'), async (req,res)=>{
@@ -523,6 +535,7 @@ app.delete('/api/alunos/:id', autenticar, exigirPerfil('admin'), async (req,res)
     await pool.query('DELETE FROM frequencias WHERE aluno_id=$1', [req.params.id]);
     await pool.query('DELETE FROM matriculas WHERE aluno_id=$1', [req.params.id]);
     await pool.query('DELETE FROM aluno_responsavel WHERE aluno_id=$1', [req.params.id]);
+    await pool.query('DELETE FROM avisos WHERE aluno_id=$1', [req.params.id]);
     await pool.query('DELETE FROM alunos WHERE id=$1', [req.params.id]);
     res.json({ mensagem:'Aluno excluído permanentemente com histórico' });
   } catch(e){ res.status(400).json({ erro:e.message }); }
@@ -982,36 +995,59 @@ app.get('/api/avisos', autenticar, async (req,res)=>{
       r = await pool.query(`
         SELECT DISTINCT a.* FROM avisos a
         WHERE (a.ativo IS NULL OR a.ativo=true)
-          AND (a.turma_id IS NULL OR EXISTS (
+          AND (
+            (a.turma_id IS NULL AND a.aluno_id IS NULL)
+            OR EXISTS (
             SELECT 1 FROM matriculas m
             JOIN aluno_responsavel ar ON ar.aluno_id=m.aluno_id
             JOIN responsaveis r ON r.id=ar.responsavel_id
             WHERE m.turma_id=a.turma_id AND (m.ativo IS NULL OR m.ativo=true)
               AND r.usuario_id=$1
-          ))
+            )
+            OR EXISTS (
+              SELECT 1 FROM aluno_responsavel ar
+              JOIN responsaveis r ON r.id=ar.responsavel_id
+              WHERE ar.aluno_id=a.aluno_id AND r.usuario_id=$1
+            )
+          )
         ORDER BY a.created_at DESC
       `, [req.usuario.id]);
     } else if (req.usuario.perfil === 'professor') {
       r = await pool.query(`
         SELECT DISTINCT a.* FROM avisos a
         WHERE (a.ativo IS NULL OR a.ativo=true)
-          AND (a.turma_id IS NULL OR EXISTS (
-            SELECT 1 FROM turmas_disciplinas td
-            JOIN professores p ON p.id=td.professor_id
-            WHERE td.turma_id=a.turma_id
-              AND (p.usuario_id=$1 OR p.id=$2)
-              AND (p.ativo IS NULL OR p.ativo=true)
-            UNION
-            SELECT 1 FROM turma_disciplina td
-            JOIN professores p ON p.id=td.professor_id
-            WHERE td.turma_id=a.turma_id
-              AND (p.usuario_id=$1 OR p.id=$2)
-              AND (p.ativo IS NULL OR p.ativo=true)
-          ))
+          AND (
+            (a.turma_id IS NULL AND a.aluno_id IS NULL)
+            OR EXISTS (
+              SELECT 1 FROM (
+                SELECT turma_id, professor_id FROM turmas_disciplinas
+                UNION
+                SELECT turma_id, professor_id FROM turma_disciplina
+              ) td
+              JOIN professores p ON p.id=td.professor_id
+              WHERE td.turma_id=a.turma_id
+                AND (p.usuario_id=$1 OR p.id=$2)
+                AND (p.ativo IS NULL OR p.ativo=true)
+            )
+            OR EXISTS (
+              SELECT 1 FROM matriculas m
+              JOIN (
+                SELECT turma_id, professor_id FROM turmas_disciplinas
+                UNION
+                SELECT turma_id, professor_id FROM turma_disciplina
+              ) td ON td.turma_id=m.turma_id
+              JOIN professores p ON p.id=td.professor_id
+              WHERE m.aluno_id=a.aluno_id AND (m.ativo IS NULL OR m.ativo=true)
+                AND (p.usuario_id=$1 OR p.id=$2)
+                AND (p.ativo IS NULL OR p.ativo=true)
+            )
+          )
         ORDER BY a.created_at DESC
       `, [req.usuario.id, req.usuario.professor_id || 0]);
     } else {
-      r = await pool.query('SELECT * FROM avisos WHERE (ativo IS NULL OR ativo=true) AND turma_id IS NULL ORDER BY created_at DESC');
+      r = await pool.query(`SELECT * FROM avisos
+        WHERE (ativo IS NULL OR ativo=true) AND turma_id IS NULL AND aluno_id IS NULL
+        ORDER BY created_at DESC`);
     }
     res.json(r.rows);
   } catch(e) {
@@ -1087,27 +1123,45 @@ app.get('/api/justificativas/:id/arquivo', autenticar, async (req,res)=>{
 // Avisos: editar + excluir permanente + listar destinatários p/ WhatsApp
 app.post('/api/avisos', autenticar, exigirPerfil('admin'), async (req,res)=>{
   try{
-    const { titulo, mensagem, turma_id } = req.body;
+    const { titulo, mensagem, turma_id, aluno_id } = req.body;
     if(!titulo?.trim() || !mensagem?.trim()) return res.status(400).json({ erro:'Informe título e mensagem do aviso.' });
     const turmaId = turma_id === undefined || turma_id === null || turma_id === '' ? null : Number(turma_id);
+    const alunoId = aluno_id === undefined || aluno_id === null || aluno_id === '' ? null : Number(aluno_id);
+    if (turmaId !== null && alunoId !== null) return res.status(400).json({ erro:'O aviso deve ser direcionado a uma turma ou a um aluno, não aos dois.' });
     if (turmaId !== null && (!Number.isInteger(turmaId) || turmaId < 1)) return res.status(400).json({ erro:'Selecione uma turma válida.' });
+    if (alunoId !== null && (!Number.isInteger(alunoId) || alunoId < 1)) return res.status(400).json({ erro:'Selecione um aluno válido.' });
     if (turmaId !== null && !(await pool.query('SELECT 1 FROM turmas WHERE id=$1', [turmaId])).rowCount) {
       return res.status(400).json({ erro:'A turma selecionada não existe.' });
     }
-    const r = await pool.query('INSERT INTO avisos (titulo,mensagem,turma_id,ativo) VALUES ($1,$2,$3,true) RETURNING *', [titulo.trim(), mensagem.trim(), turmaId]);
+    if (alunoId !== null && !(await pool.query('SELECT 1 FROM alunos WHERE id=$1 AND (ativo IS NULL OR ativo=true)', [alunoId])).rowCount) {
+      return res.status(400).json({ erro:'O aluno selecionado não existe ou está inativo.' });
+    }
+    const r = await pool.query(
+      'INSERT INTO avisos (titulo,mensagem,turma_id,aluno_id,ativo) VALUES ($1,$2,$3,$4,true) RETURNING *',
+      [titulo.trim(), mensagem.trim(), turmaId, alunoId]
+    );
     res.json(r.rows[0]);
   }catch(e){ res.status(400).json({ erro:e.message }); }
 });
 app.put('/api/avisos/:id', autenticar, exigirPerfil('admin'), async (req,res)=>{
   try{
-    const { titulo, mensagem, turma_id } = req.body;
+    const { titulo, mensagem, turma_id, aluno_id } = req.body;
     if(!titulo?.trim() || !mensagem?.trim()) return res.status(400).json({ erro:'Informe título e mensagem do aviso.' });
     const turmaId = turma_id === undefined || turma_id === null || turma_id === '' ? null : Number(turma_id);
+    const alunoId = aluno_id === undefined || aluno_id === null || aluno_id === '' ? null : Number(aluno_id);
+    if (turmaId !== null && alunoId !== null) return res.status(400).json({ erro:'O aviso deve ser direcionado a uma turma ou a um aluno, não aos dois.' });
     if (turmaId !== null && (!Number.isInteger(turmaId) || turmaId < 1)) return res.status(400).json({ erro:'Selecione uma turma válida.' });
+    if (alunoId !== null && (!Number.isInteger(alunoId) || alunoId < 1)) return res.status(400).json({ erro:'Selecione um aluno válido.' });
     if (turmaId !== null && !(await pool.query('SELECT 1 FROM turmas WHERE id=$1', [turmaId])).rowCount) {
       return res.status(400).json({ erro:'A turma selecionada não existe.' });
     }
-    const updated = await pool.query('UPDATE avisos SET titulo=$1, mensagem=$2, turma_id=$3 WHERE id=$4 RETURNING id', [titulo.trim(), mensagem.trim(), turmaId, req.params.id]);
+    if (alunoId !== null && !(await pool.query('SELECT 1 FROM alunos WHERE id=$1 AND (ativo IS NULL OR ativo=true)', [alunoId])).rowCount) {
+      return res.status(400).json({ erro:'O aluno selecionado não existe ou está inativo.' });
+    }
+    const updated = await pool.query(
+      'UPDATE avisos SET titulo=$1, mensagem=$2, turma_id=$3, aluno_id=$4 WHERE id=$5 RETURNING id',
+      [titulo.trim(), mensagem.trim(), turmaId, alunoId, req.params.id]
+    );
     if (!updated.rowCount) return res.status(404).json({ erro:'Aviso não encontrado.' });
     res.json({ mensagem:'Aviso atualizado' });
   }catch(e){ res.status(400).json({ erro:e.message }); }
@@ -1129,7 +1183,8 @@ app.get('/api/avisos/destinatarios', autenticar, exigirPerfil('admin'), async (r
       pool.query(`
         SELECT r.id, r.nome, COALESCE(NULLIF(r.telefone, ''), u.telefone) AS telefone,
                STRING_AGG(DISTINCT a.nome, ', ' ORDER BY a.nome) AS alunos,
-               ARRAY_REMOVE(ARRAY_AGG(DISTINCT m.turma_id), NULL) AS turmas_ids
+               ARRAY_REMOVE(ARRAY_AGG(DISTINCT m.turma_id), NULL) AS turmas_ids,
+               ARRAY_REMOVE(ARRAY_AGG(DISTINCT a.id), NULL) AS alunos_ids
         FROM responsaveis r
         LEFT JOIN usuarios u ON u.id=r.usuario_id
         LEFT JOIN aluno_responsavel ar ON ar.responsavel_id=r.id
@@ -1139,7 +1194,8 @@ app.get('/api/avisos/destinatarios', autenticar, exigirPerfil('admin'), async (r
         GROUP BY r.id, r.nome, r.telefone, u.telefone
       `),
       pool.query(`
-        SELECT u.id, u.nome, u.telefone, NULL::text AS alunos, ARRAY[]::int[] AS turmas_ids
+        SELECT u.id, u.nome, u.telefone, NULL::text AS alunos,
+               ARRAY[]::int[] AS turmas_ids, ARRAY[]::int[] AS alunos_ids
         FROM usuarios u
         WHERE u.perfil='responsavel' AND (u.ativo IS NULL OR u.ativo=true)
           AND NOT EXISTS (SELECT 1 FROM responsaveis r WHERE r.usuario_id=u.id)
@@ -1155,15 +1211,19 @@ app.get('/api/avisos/destinatarios', autenticar, exigirPerfil('admin'), async (r
 });
 app.post('/api/professor/avisos', autenticar, exigirPerfil('professor'), async (req,res)=>{
   try {
-    const { titulo, mensagem, turma_id, disciplina_id } = req.body;
+    const { titulo, mensagem, turma_id, disciplina_id, aluno_id } = req.body;
     const turmaId = Number(turma_id);
     const disciplinaId = Number(disciplina_id);
+    const alunoId = aluno_id === undefined || aluno_id === null || aluno_id === '' ? null : Number(aluno_id);
     if (!titulo?.trim() || !mensagem?.trim()) {
       return res.status(400).json({ erro:'Informe o título e a mensagem do aviso.' });
     }
     if (titulo.trim().length > 200) return res.status(400).json({ erro:'O título pode ter no máximo 200 caracteres.' });
     if (!Number.isInteger(turmaId) || turmaId < 1 || !Number.isInteger(disciplinaId) || disciplinaId < 1) {
       return res.status(400).json({ erro:'Selecione uma turma e disciplina válidas.' });
+    }
+    if (alunoId !== null && (!Number.isInteger(alunoId) || alunoId < 1)) {
+      return res.status(400).json({ erro:'Selecione um aluno válido.' });
     }
     const teacher = await pool.query(
       'SELECT id FROM professores WHERE usuario_id=$1 AND (ativo IS NULL OR ativo=true)',
@@ -1179,11 +1239,17 @@ app.post('/api/professor/avisos', autenticar, exigirPerfil('professor'), async (
       LIMIT 1
     `, [turmaId, disciplinaId, teacher.rows[0].id]);
     if (!assignment.rowCount) return res.status(403).json({ erro:'Esta turma e disciplina não estão vinculadas a este professor.' });
+    if (alunoId !== null && !(await pool.query(`
+      SELECT 1 FROM matriculas
+      WHERE aluno_id=$1 AND turma_id=$2 AND (ativo IS NULL OR ativo=true)
+    `, [alunoId, turmaId])).rowCount) {
+      return res.status(400).json({ erro:'O aluno selecionado não está matriculado nesta turma.' });
+    }
     const notice = await pool.query(`
-      INSERT INTO avisos (titulo, mensagem, turma_id, ativo)
-      VALUES ($1, $2, $3, true)
+      INSERT INTO avisos (titulo, mensagem, turma_id, aluno_id, ativo)
+      VALUES ($1, $2, $3, $4, true)
       RETURNING *
-    `, [titulo.trim(), mensagem.trim(), turmaId]);
+    `, [titulo.trim(), mensagem.trim(), alunoId === null ? turmaId : null, alunoId]);
     res.status(201).json(notice.rows[0]);
   } catch(e) {
     console.error('[POST /api/professor/avisos]', e);
