@@ -99,6 +99,8 @@ async function garantirTabelasFrequencias() {
       ALTER TABLE responsaveis ADD COLUMN IF NOT EXISTS ativo BOOLEAN DEFAULT true;
       ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS professor_id INT;
       ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS responsavel_id INT;
+      ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS foto_url TEXT;
+      ALTER TABLE usuarios ALTER COLUMN foto_url TYPE TEXT;
       CREATE TABLE IF NOT EXISTS responsaveis (
         id SERIAL PRIMARY KEY, nome VARCHAR(150) NOT NULL, email VARCHAR(150) UNIQUE,
         telefone VARCHAR(30), usuario_id INT, parentesco VARCHAR(50) DEFAULT 'Responsável', ativo BOOLEAN DEFAULT true
@@ -116,7 +118,9 @@ async function garantirTabelasFrequencias() {
         id SERIAL PRIMARY KEY, aluno_id INT REFERENCES alunos(id), turma_id INT REFERENCES turmas(id), ativo BOOLEAN DEFAULT true, UNIQUE(aluno_id, turma_id)
       );
       CREATE TABLE IF NOT EXISTS frequencias (
-        id SERIAL PRIMARY KEY, turma_disciplina_id INT, aluno_id INT, data DATE, presente BOOLEAN DEFAULT true, detalhes TEXT, created_at TIMESTAMPTZ DEFAULT NOW(), UNIQUE(turma_disciplina_id, aluno_id, data)
+        id SERIAL PRIMARY KEY, turma_disciplina_id INT, turma_disciplina_tipo VARCHAR(32),
+        aluno_id INT, data DATE, presente BOOLEAN DEFAULT true, detalhes TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW()
       );
       CREATE TABLE IF NOT EXISTS avisos (
         id SERIAL PRIMARY KEY, titulo VARCHAR(200), mensagem TEXT, turma_id INT, aluno_id INT,
@@ -145,6 +149,16 @@ async function garantirTabelasFrequencias() {
       );
       ALTER TABLE frequencias ADD COLUMN IF NOT EXISTS justificativa TEXT;
       ALTER TABLE frequencias ADD COLUMN IF NOT EXISTS anexo_url TEXT;
+      ALTER TABLE frequencias ADD COLUMN IF NOT EXISTS turma_disciplina_id INT;
+      ALTER TABLE frequencias ADD COLUMN IF NOT EXISTS turma_disciplina_tipo VARCHAR(32);
+      ALTER TABLE frequencias ADD COLUMN IF NOT EXISTS aluno_id INT;
+      ALTER TABLE frequencias ADD COLUMN IF NOT EXISTS data DATE;
+      ALTER TABLE frequencias ADD COLUMN IF NOT EXISTS presente BOOLEAN DEFAULT true;
+      ALTER TABLE frequencias ADD COLUMN IF NOT EXISTS detalhes TEXT;
+      ALTER TABLE frequencias ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
+      ALTER TABLE frequencias DROP CONSTRAINT IF EXISTS frequencias_turma_disciplina_id_aluno_id_data_key;
+      CREATE UNIQUE INDEX IF NOT EXISTS frequencias_assignment_student_date_idx
+        ON frequencias (turma_disciplina_tipo, turma_disciplina_id, aluno_id, data);
       ALTER TABLE alunos ALTER COLUMN foto_url TYPE TEXT;
       ALTER TABLE professores ADD COLUMN IF NOT EXISTS usuario_id INT;
       ALTER TABLE professores ADD COLUMN IF NOT EXISTS telefone VARCHAR(30);
@@ -186,9 +200,15 @@ function formatarTelefone(value) {
   const numero = telefone.length === 10 || telefone.length === 11 ? `55${telefone}` : telefone;
   return /^55\d{10,11}$/.test(numero);
 }
+function parseAttendanceAssignment(value) {
+  const typed = String(value).match(/^(turmas_disciplinas|turma_disciplina):(\d+)$/);
+  if (typed) return { id: Number(typed[2]), type: typed[1] };
+  const id = Number(value);
+  return Number.isInteger(id) && id > 0 ? { id, type: null } : null;
+}
 
 // SAUDE
-app.get('/api/versao', (req,res)=> res.json({ versao:'PRODUCAO-V3-2026-11-09', notas: true, avisos_responsavel: true, matricula_responsavel: true, professores_whatsapp: true, login_filho: true }));
+app.get('/api/versao', (req,res)=> res.json({ versao:'PRODUCAO-V4-2026-11-09', notas: true, avisos_responsavel: true, frequencia: true, foto_perfil: true, matricula_responsavel: true, professores_whatsapp: true, login_filho: true }));
 app.get('/api/saude', async (req,res)=>{
   try { await pool.query('SELECT 1'); res.json({status:'conectado', banco:'postgres'}); }
   catch(e){ res.json({status:'erro', erro:e.message}); }
@@ -765,17 +785,19 @@ app.get('/api/turmas-disciplinas/minhas', autenticar, async (req,res)=>{
     profId = pr.rows[0]?.id;
   }
   if (!profId && req.usuario.perfil==='admin') {
-    return res.json((await pool.query('SELECT td.id, td.turma_id, td.disciplina_id, td.professor_id, t.nome as turma, d.nome as disciplina FROM turmas_disciplinas td JOIN turmas t ON t.id=td.turma_id JOIN disciplinas d ON d.id=td.disciplina_id LIMIT 50')).rows);
+    return res.json((await pool.query(`SELECT 'turmas_disciplinas:' || td.id::text AS id, td.turma_id, td.disciplina_id, td.professor_id, t.nome as turma, d.nome as disciplina
+      FROM turmas_disciplinas td JOIN turmas t ON t.id=td.turma_id
+      JOIN disciplinas d ON d.id=td.disciplina_id LIMIT 50`)).rows);
   }
   if (!profId) return res.json([]);
   const r = await pool.query(`
-    SELECT td.id, td.turma_id, td.disciplina_id, td.professor_id, t.nome as turma, d.nome as disciplina
+    SELECT 'turmas_disciplinas:' || td.id::text AS id, td.turma_id, td.disciplina_id, td.professor_id, t.nome as turma, d.nome as disciplina
     FROM turmas_disciplinas td
     JOIN turmas t ON t.id=td.turma_id AND (t.ativo IS NULL OR t.ativo=true)
     JOIN disciplinas d ON d.id=td.disciplina_id AND (d.ativo IS NULL OR d.ativo=true)
     WHERE td.professor_id=$1
     UNION
-    SELECT td.id, td.turma_id, td.disciplina_id, td.professor_id, t.nome as turma, d.nome as disciplina
+    SELECT 'turma_disciplina:' || td.id::text AS id, td.turma_id, td.disciplina_id, td.professor_id, t.nome as turma, d.nome as disciplina
     FROM turma_disciplina td
     JOIN turmas t ON t.id=td.turma_id AND (t.ativo IS NULL OR t.ativo=true)
     JOIN disciplinas d ON d.id=td.disciplina_id AND (d.ativo IS NULL OR d.ativo=true)
@@ -873,17 +895,22 @@ app.delete('/api/matriculas/:id', autenticar, exigirPerfil('admin'), async (req,
 
 // --- FALTAS / FREQUENCIA - FIX DISTINCT ---
 app.get('/api/faltas/turmas/:id/alunos', autenticar, async (req,res)=>{
-  const vinculoId = req.params.id;
+  const assignment = parseAttendanceAssignment(req.params.id);
   const data = req.query.data || new Date().toISOString().slice(0,10);
   try {
-    const vinculo = await pool.query(`SELECT turma_id FROM turmas_disciplinas WHERE id=$1
-      ${req.usuario.perfil === 'professor'
-        ? 'AND professor_id=(SELECT id FROM professores WHERE usuario_id=$2)'
-        : ''} UNION SELECT turma_id FROM turma_disciplina WHERE id=$1
-      ${req.usuario.perfil === 'professor'
-        ? 'AND professor_id=(SELECT id FROM professores WHERE usuario_id=$2)'
-        : ''} LIMIT 1`, req.usuario.perfil === 'professor' ? [vinculoId, req.usuario.id] : [vinculoId]);
     if (!['admin', 'professor'].includes(req.usuario.perfil)) return res.status(403).json({ erro:'Seu perfil não pode consultar a chamada.' });
+    if (!assignment) return res.status(400).json({ erro:'Selecione um vínculo válido.' });
+    const values = [assignment.id];
+    const teacherFilter = req.usuario.perfil === 'professor'
+      ? ' AND professor_id=(SELECT id FROM professores WHERE usuario_id=$2)'
+      : '';
+    if (req.usuario.perfil === 'professor') values.push(req.usuario.id);
+    const lookup = assignment.type
+      ? `SELECT turma_id, professor_id, '${assignment.type}'::text AS tipo FROM ${assignment.type} WHERE id=$1${teacherFilter}`
+      : `SELECT turma_id, professor_id, 'turmas_disciplinas'::text AS tipo FROM turmas_disciplinas WHERE id=$1${teacherFilter}
+         UNION SELECT turma_id, professor_id, 'turma_disciplina'::text AS tipo FROM turma_disciplina WHERE id=$1${teacherFilter}
+         LIMIT 1`;
+    const vinculo = await pool.query(lookup, values);
     if (!vinculo.rowCount) return res.status(404).json({ erro:'Vínculo de turma e disciplina não encontrado.' });
     const turmaId = vinculo.rows[0].turma_id;
     const r = await pool.query(`
@@ -893,92 +920,196 @@ app.get('/api/faltas/turmas/:id/alunos', autenticar, async (req,res)=>{
              f.presente, f.detalhes
       FROM alunos a
       JOIN matriculas m ON m.aluno_id=a.id AND m.turma_id=$2 AND (m.ativo IS NULL OR m.ativo=true)
-      LEFT JOIN frequencias f ON f.aluno_id=a.id AND f.data=$3 AND f.turma_disciplina_id=$1
+      LEFT JOIN LATERAL (
+        SELECT f.presente, f.detalhes
+        FROM frequencias f
+        WHERE f.aluno_id=a.id AND f.data=$3 AND f.turma_disciplina_id=$1
+          AND (f.turma_disciplina_tipo=$4 OR f.turma_disciplina_tipo IS NULL)
+        ORDER BY CASE WHEN f.turma_disciplina_tipo=$4 THEN 0 ELSE 1 END, f.id DESC
+        LIMIT 1
+      ) f ON true
       WHERE a.ativo IS NULL OR a.ativo=true
       ORDER BY a.nome
-    `, [vinculoId, turmaId, data]);
+    `, [assignment.id, turmaId, data, vinculo.rows[0].tipo]);
     // Normaliza presente
     const alunos = r.rows.map(row=>({ ...row, presente: row.presente !== false, detalhes: row.detalhes||'', responsaveis: row.responsaveis||[] }));
     res.json(alunos);
   } catch(e){
-    console.error('Erro faltas:', e);
-    res.status(500).json({ erro: e.message });
+    console.error('[GET /api/faltas/turmas/:id/alunos]', e);
+    res.status(500).json({ erro:'Não foi possível carregar os alunos da chamada.' });
   }
 });
 app.post('/api/faltas/chamada', autenticar, async (req,res)=>{
-  const { turma_disciplina_id, data, registros } = req.body;
-  if (!turma_disciplina_id || !data || !Array.isArray(registros)) return res.status(400).json({ erro:'Dados inválidos' });
   if (!['admin', 'professor'].includes(req.usuario.perfil)) return res.status(403).json({ erro:'Seu perfil não pode registrar frequência.' });
-  const vinculo = await pool.query(`SELECT turma_id, professor_id FROM turmas_disciplinas WHERE id=$1
-    UNION SELECT turma_id, professor_id FROM turma_disciplina WHERE id=$1 LIMIT 1`, [turma_disciplina_id]);
-  if (!vinculo.rowCount) return res.status(404).json({ erro:'Vínculo de turma e disciplina não encontrado.' });
-  if (req.usuario.perfil === 'professor') {
-    const teacher = await pool.query('SELECT id FROM professores WHERE usuario_id=$1 AND (ativo IS NULL OR ativo=true)', [req.usuario.id]);
-    if (!teacher.rowCount || Number(teacher.rows[0].id) !== Number(vinculo.rows[0].professor_id)) return res.status(403).json({ erro:'Este vínculo não pertence ao professor.' });
+  const { turma_disciplina_id, data, registros } = req.body || {};
+  const assignment = parseAttendanceAssignment(turma_disciplina_id);
+  if (!assignment ||
+      typeof data !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(data) || !Array.isArray(registros)) {
+    return res.status(400).json({ erro:'Informe turma, data e lista de alunos válidas.' });
   }
-  const turmaId = vinculo.rows[0].turma_id;
-  const studentIds = [...new Set(registros.map((reg) => Number(reg.aluno_id)).filter(Number.isInteger))];
-  if (studentIds.length !== registros.length) return res.status(400).json({ erro:'A lista de alunos contém identificadores inválidos.' });
-  const enrolled = await pool.query('SELECT aluno_id FROM matriculas WHERE turma_id=$1 AND aluno_id=ANY($2::int[]) AND (ativo IS NULL OR ativo=true)', [turmaId, studentIds]);
-  if (enrolled.rowCount !== studentIds.length) return res.status(400).json({ erro:'A chamada contém aluno(s) não matriculado(s) nesta turma.' });
-  let faltas=0;
-  for (const reg of registros) {
-    const presente = reg.presente !== false;
-    if (!presente) faltas++;
-    await pool.query(`INSERT INTO frequencias (turma_disciplina_id, aluno_id, data, presente, detalhes) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (turma_disciplina_id, aluno_id, data) DO UPDATE SET presente=$4, detalhes=$5`, [turma_disciplina_id, reg.aluno_id, data, presente, reg.detalhes||'']);
+  const studentIds = registros.map((reg) => Number(reg?.aluno_id));
+  if (studentIds.some((id) => !Number.isInteger(id) || id < 1) ||
+      new Set(studentIds).size !== studentIds.length ||
+      registros.some((reg) => typeof reg?.presente !== 'boolean' || (reg.detalhes != null && typeof reg.detalhes !== 'string'))) {
+    return res.status(400).json({ erro:'A lista de alunos contém dados inválidos.' });
   }
-  res.json({ mensagem:`Chamada salva para ${data}`, faltas });
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`attendance:${assignment.type || 'legacy'}:${assignment.id}:${data}`]);
+    const values = [assignment.id];
+    const teacherFilter = req.usuario.perfil === 'professor'
+      ? ' AND professor_id=(SELECT id FROM professores WHERE usuario_id=$2 AND (ativo IS NULL OR ativo=true))'
+      : '';
+    if (req.usuario.perfil === 'professor') values.push(req.usuario.id);
+    const lookup = assignment.type
+      ? `SELECT turma_id, professor_id, '${assignment.type}'::text AS tipo FROM ${assignment.type} WHERE id=$1${teacherFilter}`
+      : `SELECT turma_id, professor_id, 'turmas_disciplinas'::text AS tipo FROM turmas_disciplinas WHERE id=$1${teacherFilter}
+         UNION SELECT turma_id, professor_id, 'turma_disciplina'::text AS tipo FROM turma_disciplina WHERE id=$1${teacherFilter}
+         LIMIT 1`;
+    const vinculo = await client.query(lookup, values);
+    if (!vinculo.rowCount) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ erro:'Vínculo de turma e disciplina não encontrado.' });
+    }
+    if (req.usuario.perfil === 'professor' && Number(vinculo.rows[0].professor_id) !== Number((await client.query(
+      'SELECT id FROM professores WHERE usuario_id=$1 AND (ativo IS NULL OR ativo=true)', [req.usuario.id]
+    )).rows[0]?.id)) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ erro:'Este vínculo não pertence ao professor.' });
+    }
+    const turmaId = vinculo.rows[0].turma_id;
+    const enrolled = await client.query(
+      'SELECT aluno_id FROM matriculas WHERE turma_id=$1 AND aluno_id=ANY($2::int[]) AND (ativo IS NULL OR ativo=true)',
+      [turmaId, studentIds]
+    );
+    if (enrolled.rowCount !== studentIds.length) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ erro:'A chamada contém aluno(s) não matriculado(s) nesta turma.' });
+    }
+    let faltas = 0;
+    for (const reg of registros) {
+      const presente = reg.presente;
+      const detalhes = reg.detalhes?.trim() || null;
+      if (!presente) faltas++;
+      const existing = await client.query(
+        `SELECT id FROM frequencias
+         WHERE turma_disciplina_id=$1 AND aluno_id=$2 AND data=$3
+           AND (turma_disciplina_tipo=$4 OR turma_disciplina_tipo IS NULL)
+         ORDER BY id DESC LIMIT 1 FOR UPDATE`,
+        [assignment.id, reg.aluno_id, data, vinculo.rows[0].tipo]
+      );
+      if (existing.rowCount) {
+        await client.query(
+          'UPDATE frequencias SET presente=$1, detalhes=$2, turma_disciplina_tipo=$3 WHERE id=$4',
+          [presente, detalhes, vinculo.rows[0].tipo, existing.rows[0].id]
+        );
+      } else {
+        await client.query(
+          `INSERT INTO frequencias (turma_disciplina_id, turma_disciplina_tipo, aluno_id, data, presente, detalhes)
+           VALUES ($1,$2,$3,$4,$5,$6)`,
+          [assignment.id, vinculo.rows[0].tipo, reg.aluno_id, data, presente, detalhes]
+        );
+      }
+    }
+    await client.query('COMMIT');
+    res.json({ mensagem:`Chamada salva para ${data}`, faltas });
+  } catch(e) {
+    await client.query('ROLLBACK');
+    console.error('[POST /api/faltas/chamada]', e);
+    res.status(500).json({ erro:'Não foi possível salvar a chamada.' });
+  } finally { client.release(); }
 });
 app.get('/api/faltas/aluno/:id', autenticar, async (req,res)=>{
   if (!['admin', 'professor', 'responsavel'].includes(req.usuario.perfil)) return res.status(403).json({ erro:'Seu perfil não pode consultar frequência.' });
-  if (req.usuario.perfil === 'responsavel') {
-    const linked = await pool.query('SELECT 1 FROM aluno_responsavel ar JOIN responsaveis r ON r.id=ar.responsavel_id WHERE ar.aluno_id=$1 AND r.usuario_id=$2', [req.params.id, req.usuario.id]);
-    if (!linked.rowCount) return res.status(403).json({ erro:'Este aluno não está vinculado ao seu acesso.' });
-  } else if (req.usuario.perfil === 'professor') {
-    const assigned = await pool.query(`SELECT 1 FROM frequencias f
-      JOIN professores p ON p.usuario_id=$2
-      JOIN (
-        SELECT id, professor_id FROM turmas_disciplinas
-        UNION
-        SELECT id, professor_id FROM turma_disciplina
-      ) td ON td.id=f.turma_disciplina_id AND td.professor_id=p.id
-      WHERE f.aluno_id=$1 LIMIT 1`, [req.params.id, req.usuario.id]);
-    if (!assigned.rowCount) return res.status(403).json({ erro:'Este aluno não pertence às turmas deste professor.' });
-  }
-  const r = await pool.query(`
+  try {
+    if (req.usuario.perfil === 'responsavel') {
+      const linked = await pool.query(`SELECT 1 FROM aluno_responsavel ar
+        JOIN responsaveis r ON r.id=ar.responsavel_id
+        WHERE ar.aluno_id=$1 AND (r.usuario_id=$2 OR r.id=(
+          SELECT u.responsavel_id FROM usuarios u WHERE u.id=$2
+        ))`, [req.params.id, req.usuario.id]);
+      if (!linked.rowCount) return res.status(403).json({ erro:'Este aluno não está vinculado ao seu acesso.' });
+    } else if (req.usuario.perfil === 'professor') {
+      const assigned = await pool.query(`SELECT 1 FROM frequencias f
+        JOIN professores p ON p.usuario_id=$2
+        JOIN (
+          SELECT id, professor_id, 'turmas_disciplinas'::text AS tipo FROM turmas_disciplinas
+          UNION
+          SELECT id, professor_id, 'turma_disciplina'::text AS tipo FROM turma_disciplina
+        ) td ON td.id=f.turma_disciplina_id AND td.professor_id=p.id
+          AND (f.turma_disciplina_tipo=td.tipo OR f.turma_disciplina_tipo IS NULL)
+        WHERE f.aluno_id=$1 LIMIT 1`, [req.params.id, req.usuario.id]);
+      if (!assigned.rowCount) return res.status(403).json({ erro:'Este aluno não pertence às turmas deste professor.' });
+    }
+    const r = await pool.query(`
     SELECT f.*, t.nome as turma, d.nome as disciplina, p.nome as professor
     FROM frequencias f
-    LEFT JOIN (
-      SELECT id, turma_id, disciplina_id, professor_id FROM turmas_disciplinas
-      UNION
-      SELECT id, turma_id, disciplina_id, professor_id FROM turma_disciplina
-    ) td ON td.id=f.turma_disciplina_id
+    LEFT JOIN LATERAL (
+      SELECT links.turma_id, links.disciplina_id, links.professor_id
+      FROM (
+        SELECT id, turma_id, disciplina_id, professor_id, 'turmas_disciplinas'::text AS tipo FROM turmas_disciplinas
+        UNION ALL
+        SELECT id, turma_id, disciplina_id, professor_id, 'turma_disciplina'::text AS tipo FROM turma_disciplina
+      ) links
+      WHERE links.id=f.turma_disciplina_id
+        AND (f.turma_disciplina_tipo=links.tipo OR f.turma_disciplina_tipo IS NULL)
+      ORDER BY CASE WHEN f.turma_disciplina_tipo=links.tipo THEN 0 ELSE 1 END, links.tipo
+      LIMIT 1
+    ) td ON true
     LEFT JOIN turmas t ON t.id=td.turma_id
     LEFT JOIN disciplinas d ON d.id=td.disciplina_id
     LEFT JOIN professores p ON p.id=td.professor_id
     WHERE f.aluno_id=$1 AND f.presente=false
     ORDER BY f.data DESC
-  `, [req.params.id]);
-  const total = r.rows.length;
-  // justificativas
-  for (const row of r.rows) {
-    const j = await pool.query('SELECT id, nome_original FROM justificativas WHERE falta_id=$1', [row.id]);
-    row.justificativas = j.rows;
+    `, [req.params.id]);
+    const total = r.rows.length;
+    for (const row of r.rows) {
+      const j = await pool.query('SELECT id, nome_original FROM justificativas WHERE falta_id=$1', [row.id]);
+      row.justificativas = j.rows;
+    }
+    res.json({ total, faltas: r.rows });
+  } catch(e) {
+    console.error('[GET /api/faltas/aluno/:id]', e);
+    res.status(500).json({ erro:'Não foi possível carregar as faltas do aluno.' });
   }
-  res.json({ total, faltas: r.rows });
 });
 
 // --- PERFIL FOTO ---
 app.get('/api/perfil/foto', autenticar, async (req,res)=>{
-  // Retorna placeholder - implementar storage real se quiser
-  const u = await pool.query('SELECT foto_url FROM usuarios WHERE id=$1', [req.usuario.id]);
-  if (!u.rows[0]?.foto_url) return res.status(404).json({ erro:'Foto do perfil não encontrada.' });
-  res.json({ foto_url: u.rows[0].foto_url });
+  try {
+    const u = await pool.query('SELECT foto_url FROM usuarios WHERE id=$1', [req.usuario.id]);
+    const foto = u.rows[0]?.foto_url;
+    if (typeof foto !== 'string' || !/^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(foto)) {
+      return res.status(404).json({ erro:'Foto do perfil não encontrada.' });
+    }
+    res.json({ foto_url: foto });
+  } catch(e) {
+    console.error('[GET /api/perfil/foto]', e);
+    res.status(500).json({ erro:'Não foi possível carregar a foto do perfil.' });
+  }
 });
 app.put('/api/perfil/foto', autenticar, async (req,res)=>{
-  const { imagem } = req.body;
-  await pool.query('UPDATE usuarios SET foto_url=$1 WHERE id=$2', ['foto_existe', req.usuario.id]);
-  res.json({ mensagem:'Foto do perfil atualizada' });
+  try {
+    const { imagem } = req.body || {};
+    const match = typeof imagem === 'string'
+      ? imagem.match(/^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/]+={0,2})$/)
+      : null;
+    if (!match) return res.status(400).json({ erro:'Envie uma imagem JPEG, PNG ou WEBP válida.' });
+    const bytes = Buffer.from(match[2], 'base64');
+    if (!bytes.length || bytes.length > 10 * 1024 * 1024) {
+      return res.status(400).json({ erro:'A foto deve ter no máximo 10 MB.' });
+    }
+    const updated = await pool.query(
+      'UPDATE usuarios SET foto_url=$1 WHERE id=$2 RETURNING id',
+      [imagem, req.usuario.id]
+    );
+    if (!updated.rowCount) return res.status(404).json({ erro:'Usuário não encontrado.' });
+    res.json({ mensagem:'Foto do perfil atualizada.', foto_url:imagem });
+  } catch(e) {
+    console.error('[PUT /api/perfil/foto]', e);
+    res.status(500).json({ erro:'Não foi possível salvar a foto do perfil.' });
+  }
 });
 
 // --- RESPONSAVEL / FILHOS ---
