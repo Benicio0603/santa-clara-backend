@@ -156,7 +156,26 @@ async function garantirTabelasFrequencias() {
       ALTER TABLE frequencias ADD COLUMN IF NOT EXISTS presente BOOLEAN DEFAULT true;
       ALTER TABLE frequencias ADD COLUMN IF NOT EXISTS detalhes TEXT;
       ALTER TABLE frequencias ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
-      ALTER TABLE frequencias DROP CONSTRAINT IF EXISTS frequencias_turma_disciplina_id_aluno_id_data_key;
+      DO $$
+      DECLARE legacy_unique RECORD;
+      BEGIN
+        FOR legacy_unique IN
+          SELECT c.conname
+          FROM pg_constraint c
+          JOIN pg_class t ON t.oid=c.conrelid
+          JOIN pg_namespace n ON n.oid=t.relnamespace
+          WHERE c.contype='u'
+            AND t.relname='frequencias'
+            AND n.nspname=current_schema()
+            AND (
+              SELECT array_agg(a.attname::text ORDER BY a.attname::text)
+              FROM unnest(c.conkey) AS key_column(attnum)
+              JOIN pg_attribute a ON a.attrelid=t.oid AND a.attnum=key_column.attnum
+            )=ARRAY['aluno_id','data','turma_disciplina_id']::text[]
+        LOOP
+          EXECUTE format('ALTER TABLE %I.frequencias DROP CONSTRAINT %I', current_schema(), legacy_unique.conname);
+        END LOOP;
+      END $$;
       CREATE UNIQUE INDEX IF NOT EXISTS frequencias_assignment_student_date_idx
         ON frequencias (turma_disciplina_tipo, turma_disciplina_id, aluno_id, data);
       ALTER TABLE alunos ALTER COLUMN foto_url TYPE TEXT;
@@ -208,7 +227,7 @@ function parseAttendanceAssignment(value) {
 }
 
 // SAUDE
-app.get('/api/versao', (req,res)=> res.json({ versao:'PRODUCAO-V5-2026-11-09', notas: true, avisos_responsavel: true, frequencia: true, foto_perfil: true, matricula_responsavel: true, professores_whatsapp: true, login_filho: true }));
+app.get('/api/versao', (req,res)=> res.json({ versao:'PRODUCAO-V6-2026-11-09', notas: true, avisos_responsavel: true, frequencia: true, foto_perfil: true, matricula_responsavel: true, professores_whatsapp: true, login_filho: true }));
 app.get('/api/saude', async (req,res)=>{
   try { await pool.query('SELECT 1'); res.json({status:'conectado', banco:'postgres'}); }
   catch(e){ res.json({status:'erro', erro:e.message}); }
@@ -996,32 +1015,26 @@ app.post('/api/faltas/chamada', autenticar, async (req,res)=>{
       const presente = reg.presente;
       const detalhes = reg.detalhes?.trim() || null;
       if (!presente) faltas++;
-      const existing = await client.query(
-        `SELECT id FROM frequencias
-         WHERE turma_disciplina_id=$1 AND aluno_id=$2 AND data=$3
-           AND (turma_disciplina_tipo=$4 OR turma_disciplina_tipo IS NULL)
-         ORDER BY id DESC LIMIT 1 FOR UPDATE`,
-        [assignment.id, reg.aluno_id, data, vinculo.rows[0].tipo]
+      await client.query(
+        `INSERT INTO frequencias (turma_disciplina_id, turma_disciplina_tipo, aluno_id, data, presente, detalhes)
+         VALUES ($1,$2,$3,$4,$5,$6)
+         ON CONFLICT (turma_disciplina_tipo, turma_disciplina_id, aluno_id, data)
+         DO UPDATE SET presente=EXCLUDED.presente, detalhes=EXCLUDED.detalhes`,
+        [assignment.id, vinculo.rows[0].tipo, reg.aluno_id, data, presente, detalhes]
       );
-      if (existing.rowCount) {
-        await client.query(
-          'UPDATE frequencias SET presente=$1, detalhes=$2, turma_disciplina_tipo=$3 WHERE id=$4',
-          [presente, detalhes, vinculo.rows[0].tipo, existing.rows[0].id]
-        );
-      } else {
-        await client.query(
-          `INSERT INTO frequencias (turma_disciplina_id, turma_disciplina_tipo, aluno_id, data, presente, detalhes)
-           VALUES ($1,$2,$3,$4,$5,$6)`,
-          [assignment.id, vinculo.rows[0].tipo, reg.aluno_id, data, presente, detalhes]
-        );
-      }
     }
     await client.query('COMMIT');
     res.json({ mensagem:`Chamada salva para ${data}`, faltas });
   } catch(e) {
     await client.query('ROLLBACK');
     console.error('[POST /api/faltas/chamada]', e);
-    res.status(500).json({ erro:'Não foi possível salvar a chamada.' });
+    const message = {
+      '23503': 'Não foi possível salvar: a turma, disciplina ou aluno não existe mais. Atualize a tela e tente novamente.',
+      '23505': 'Já existe uma chamada para esta turma, aluno e data. Atualize a tela e tente novamente.',
+      '42703': 'O banco ainda não tem todas as colunas da frequência. Verifique se a versão mais recente do backend iniciou corretamente.',
+      '42P01': 'A tabela de frequência não foi inicializada. Verifique os logs de inicialização do backend.'
+    }[e.code] || 'Não foi possível salvar a chamada. Verifique os logs do backend.';
+    res.status(500).json({ erro:message });
   } finally { client.release(); }
 });
 app.get('/api/faltas/aluno/:id', autenticar, async (req,res)=>{
