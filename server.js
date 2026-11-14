@@ -286,6 +286,27 @@ app.delete('/api/alunos/:id', autenticar, async (req,res)=>{
 });
 
 // --- RESPONSAVEIS ---
+app.get('/api/responsaveis', autenticar, exigirPerfil('admin'), async (req,res)=>{
+  try{
+    const incluir = req.query.incluirInativas === 'true';
+    const r = await pool.query(`
+      SELECT * FROM (
+        SELECT r.id, r.nome, r.telefone, r.usuario_id, r.parentesco, r.ativo,
+               u.email as usuario_email,
+               COALESCE((SELECT string_agg(a.nome, ', ' ORDER BY a.nome) FROM alunos a JOIN aluno_responsavel ar ON ar.aluno_id=a.id WHERE ar.responsavel_id=r.id), '') as alunos_vinculados
+        FROM responsaveis r LEFT JOIN usuarios u ON u.id=r.usuario_id
+        UNION ALL
+        SELECT NULL as id, u.nome, u.telefone, u.id as usuario_id, 'Responsável' as parentesco, u.ativo as ativo,
+               u.email as usuario_email, '' as alunos_vinculados
+        FROM usuarios u WHERE u.perfil='responsavel' AND NOT EXISTS (SELECT 1 FROM responsaveis r2 WHERE r2.usuario_id=u.id)
+      ) t
+      ${incluir ? '' : 'WHERE (t.ativo IS NULL OR t.ativo=true)'}
+      ORDER BY t.nome`);
+    res.json(r.rows);
+  }catch(e){ console.error('[GET /responsaveis]', e); res.status(400).json({ erro:e.message }); }
+});
+
+// --- RESPONSAVEIS ---
 app.get('/api/alunos/:id/responsaveis', autenticar, async (req,res)=>{
   const r = await pool.query(`SELECT r.*, ar.parentesco, u.email as usuario_email, r.telefone FROM responsaveis r JOIN aluno_responsavel ar ON ar.responsavel_id=r.id LEFT JOIN usuarios u ON u.id=r.usuario_id WHERE ar.aluno_id=$1 AND (r.ativo IS NULL OR r.ativo=true)`, [req.params.id]);
   res.json(r.rows);
