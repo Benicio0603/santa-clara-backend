@@ -326,6 +326,25 @@ app.delete('/api/alunos/:id', autenticar, async (req,res)=>{
 });
 
 // --- RESPONSAVEIS ---
+app.get('/api/responsaveis', autenticar, async (req,res)=>{
+  try {
+    const incluirInativas = req.query.incluirInativas === 'true';
+    const whereClause = incluirInativas ? '' : 'WHERE r.ativo IS NULL OR r.ativo=true';
+    const query = `
+      SELECT r.*, u.email as usuario_email,
+             (SELECT string_agg(a.nome, ', ') FROM aluno_responsavel ar JOIN alunos a ON a.id = ar.aluno_id WHERE ar.responsavel_id = r.id) as alunos_vinculados
+      FROM responsaveis r
+      LEFT JOIN usuarios u ON u.id = r.usuario_id
+      ${whereClause}
+      ORDER BY r.nome
+    `;
+    const r = await pool.query(query);
+    res.json(r.rows);
+  } catch(e){
+    console.error('GET responsaveis', e);
+    res.status(500).json({ erro: e.message });
+  }
+});
 app.get('/api/alunos/:id/responsaveis', autenticar, async (req,res)=>{
   const r = await pool.query(`SELECT r.*, ar.parentesco, u.email as usuario_email, r.telefone FROM responsaveis r JOIN aluno_responsavel ar ON ar.responsavel_id=r.id LEFT JOIN usuarios u ON u.id=r.usuario_id WHERE ar.aluno_id=$1 AND (r.ativo IS NULL OR r.ativo=true)`, [req.params.id]);
   res.json(r.rows);
