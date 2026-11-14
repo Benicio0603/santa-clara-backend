@@ -347,12 +347,12 @@ app.put('/api/responsaveis/:id', autenticar, async (req,res)=>{
       if (rRes.rows.length > 0) {
         respId = rRes.rows[0].id;
       } else {
-        let ins = await pool.query('INSERT INTO responsaveis (nome, email, telefone, usuario_id) VALUES ($1, $2, $3, $4) RETURNING id', [nome, email, telefone, userId]);
+        let ins = await pool.query('INSERT INTO responsaveis (nome, telefone, usuario_id) VALUES ($1, $2, $3) RETURNING id', [nome, telefone, userId]);
         respId = ins.rows[0].id;
       }
     }
 
-    await pool.query('UPDATE responsaveis SET nome=$1, email=$2, telefone=$3 WHERE id=$4', [nome, email, telefone, respId]);
+    await pool.query('UPDATE responsaveis SET nome=$1, telefone=$2 WHERE id=$3', [nome, telefone, respId]);
     
     const r = await pool.query('SELECT usuario_id FROM responsaveis WHERE id=$1', [respId]);
     let usuarioId = r.rows[0]?.usuario_id;
@@ -553,7 +553,9 @@ app.get('/api/responsavel/filhos', autenticar, async (req,res)=>{
       WHERE a.id IN (
         SELECT ar.aluno_id FROM aluno_responsavel ar 
         JOIN responsaveis rr ON rr.id=ar.responsavel_id 
-        WHERE rr.usuario_id=$1 OR LOWER(rr.email)=LOWER($2) OR rr.id IN (SELECT responsavel_id FROM usuarios WHERE id=$1)
+        WHERE rr.usuario_id=$1 
+           OR rr.id IN (SELECT responsavel_id FROM usuarios WHERE id=$1 OR LOWER(email)=LOWER($2))
+           OR rr.usuario_id IN (SELECT id FROM usuarios WHERE id=$1 OR LOWER(email)=LOWER($2))
       )
     `, [userId, userEmail || '']);
     res.json(r.rows);
