@@ -1,4 +1,4 @@
-﻿
+
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -110,6 +110,15 @@ function autenticar(req, res, next) {
   try { req.usuario = jwt.verify(token, JWT_SECRET); next(); }
   catch { return res.status(401).json({ erro: 'Token invÃ¡lido' }); }
 }
+function exigirPerfil(...perfis) {
+  return (req, res, next) => {
+    if (!perfis.includes(req.usuario?.perfil)) {
+      return res.status(403).json({ erro: 'Acesso negado para este perfil' });
+    }
+    next();
+  };
+}
+
 
 // SAUDE
 app.get('/api/saude', async (req,res)=>{
@@ -241,7 +250,14 @@ app.delete('/api/professores/:id', autenticar, async (req,res)=>{
 
 // --- ALUNOS ---
 app.get('/api/alunos', autenticar, async (req,res)=>{
-  const r = await pool.query('SELECT * FROM alunos WHERE ativo IS NULL OR ativo=true ORDER BY nome');
+  const r = await pool.query(`
+    SELECT a.*, m.turma_id, t.nome as turma
+    FROM alunos a
+    LEFT JOIN matriculas m ON m.aluno_id=a.id AND (m.ativo IS NULL OR m.ativo=true)
+    LEFT JOIN turmas t ON t.id=m.turma_id
+    WHERE a.ativo IS NULL OR a.ativo=true
+    ORDER BY a.nome
+  `);
   res.json(r.rows);
 });
 app.post('/api/alunos', autenticar, async (req,res)=>{
@@ -256,9 +272,8 @@ app.put('/api/alunos/:id', autenticar, async (req,res)=>{
 });
 app.put('/api/alunos/:id/foto', autenticar, async (req,res)=>{
   const { imagem } = req.body;
-  // Salva como base64 ou url - simplificado salva url placeholder
-  await pool.query('UPDATE alunos SET foto_url=$1 WHERE id=$2', ['foto_existe', req.params.id]);
-  res.json({ mensagem:'Foto salva', foto_url:`/api/alunos/${req.params.id}/foto-arquivo` });
+  await pool.query('UPDATE alunos SET foto_url=$1 WHERE id=$2', [imagem, req.params.id]);
+  res.json({ mensagem:'Foto salva', foto_url: imagem });
 });
 app.get('/api/alunos/:id/foto-arquivo', autenticar, async (req,res)=>{
   res.status(404).json({ erro:'Implementar storage de foto se necessÃ¡rio' });
@@ -277,6 +292,27 @@ app.delete('/api/alunos/:id', autenticar, async (req,res)=>{
     await pool.query('DELETE FROM alunos WHERE id=$1', [req.params.id]);
     res.json({ mensagem:'Aluno excluÃ­do permanentemente com histÃ³rico' });
   } catch(e){ res.status(400).json({ erro:e.message }); }
+});
+
+// --- RESPONSAVEIS ---
+app.get('/api/responsaveis', autenticar, exigirPerfil('admin'), async (req,res)=>{
+  try{
+    const incluir = req.query.incluirInativas === 'true';
+    const r = await pool.query(`
+      SELECT * FROM (
+        SELECT r.id, r.nome, r.telefone, r.usuario_id, r.parentesco, r.ativo,
+               u.email as usuario_email,
+               COALESCE((SELECT string_agg(a.nome, ', ' ORDER BY a.nome) FROM alunos a JOIN aluno_responsavel ar ON ar.aluno_id=a.id WHERE ar.responsavel_id=r.id), '') as alunos_vinculados
+        FROM responsaveis r LEFT JOIN usuarios u ON u.id=r.usuario_id
+        UNION ALL
+        SELECT NULL as id, u.nome, u.telefone, u.id as usuario_id, 'Responsável' as parentesco, u.ativo as ativo,
+               u.email as usuario_email, '' as alunos_vinculados
+        FROM usuarios u WHERE u.perfil='responsavel' AND NOT EXISTS (SELECT 1 FROM responsaveis r2 WHERE r2.usuario_id=u.id)
+      ) t
+      ${incluir ? '' : 'WHERE (t.ativo IS NULL OR t.ativo=true)'}
+      ORDER BY t.nome`);
+    res.json(r.rows);
+  }catch(e){ console.error('[GET /responsaveis]', e); res.status(400).json({ erro:e.message }); }
 });
 
 // --- RESPONSAVEIS ---
