@@ -332,11 +332,52 @@ app.post('/api/responsaveis', autenticar, async (req,res)=>{
   res.json({ mensagem:'ResponsÃ¡vel criado e vinculado' });
 });
 app.put('/api/responsaveis/:id', autenticar, async (req,res)=>{
-  const { nome, email, telefone } = req.body;
-  await pool.query('UPDATE responsaveis SET nome=$1,email=$2,telefone=$3 WHERE id=$4', [nome,email,telefone,req.params.id]);
-  const r = await pool.query('SELECT usuario_id FROM responsaveis WHERE id=$1', [req.params.id]);
-  if (r.rows[0]?.usuario_id) await pool.query('UPDATE usuarios SET nome=$1,email=$2,telefone=$3 WHERE id=$4', [nome,email,telefone,r.rows[0].usuario_id]);
-  res.json({ mensagem:'ResponsÃ¡vel atualizado' });
+  try {
+    const { nome, email, telefone, senha_nova, senha } = req.body;
+    const novaSenha = senha_nova || senha;
+    let respId = req.params.id;
+
+    if (!respId || respId === 'null' || respId === 'undefined') {
+      let uRes = await pool.query('SELECT id FROM usuarios WHERE email=$1', [email?.trim().toLowerCase()]);
+      if (uRes.rows.length === 0) {
+        return res.status(400).json({ erro: 'Usuário não encontrado para atualizar' });
+      }
+      let userId = uRes.rows[0].id;
+      let rRes = await pool.query('SELECT id FROM responsaveis WHERE usuario_id=$1', [userId]);
+      if (rRes.rows.length > 0) {
+        respId = rRes.rows[0].id;
+      } else {
+        let ins = await pool.query('INSERT INTO responsaveis (nome, email, telefone, usuario_id) VALUES ($1, $2, $3, $4) RETURNING id', [nome, email, telefone, userId]);
+        respId = ins.rows[0].id;
+      }
+    }
+
+    await pool.query('UPDATE responsaveis SET nome=$1, email=$2, telefone=$3 WHERE id=$4', [nome, email, telefone, respId]);
+    
+    const r = await pool.query('SELECT usuario_id FROM responsaveis WHERE id=$1', [respId]);
+    let usuarioId = r.rows[0]?.usuario_id;
+    
+    if (usuarioId) {
+      if (novaSenha) {
+        const hash = await bcrypt.hash(novaSenha, 10);
+        await pool.query('UPDATE usuarios SET nome=$1, email=$2, telefone=$3, senha=$4, senha_hash=$5 WHERE id=$6', [nome, email, telefone, hash, hash, usuarioId]);
+      } else {
+        await pool.query('UPDATE usuarios SET nome=$1, email=$2, telefone=$3 WHERE id=$4', [nome, email, telefone, usuarioId]);
+      }
+    } else if (email) {
+      if (novaSenha) {
+        const hash = await bcrypt.hash(novaSenha, 10);
+        await pool.query('UPDATE usuarios SET nome=$1, telefone=$2, senha=$3, senha_hash=$4 WHERE email=$5', [nome, telefone, hash, hash, email.trim().toLowerCase()]);
+      } else {
+        await pool.query('UPDATE usuarios SET nome=$1, telefone=$2 WHERE email=$3', [nome, telefone, email.trim().toLowerCase()]);
+      }
+    }
+
+    res.json({ mensagem: 'Responsável atualizado com sucesso' });
+  } catch(e) {
+    console.error('[PUT /responsaveis/:id]', e);
+    res.status(400).json({ erro: e.message });
+  }
 });
 app.put('/api/alunos/:alunoId/responsaveis/:respId', autenticar, async (req,res)=>{
   await pool.query('UPDATE aluno_responsavel SET parentesco=$1 WHERE aluno_id=$2 AND responsavel_id=$3', [req.body.parentesco, req.params.alunoId, req.params.respId]);
@@ -501,10 +542,26 @@ app.put('/api/perfil/foto', autenticar, async (req,res)=>{
 
 // --- RESPONSAVEL / FILHOS ---
 app.get('/api/responsavel/filhos', autenticar, async (req,res)=>{
-  const r = await pool.query(`SELECT a.*, t.nome as turma FROM alunos a LEFT JOIN matriculas m ON m.aluno_id=a.id AND (m.ativo IS NULL OR m.ativo=true) LEFT JOIN turmas t ON t.id=m.turma_id WHERE a.id IN (SELECT ar.aluno_id FROM aluno_responsavel ar JOIN responsaveis rr ON rr.id=ar.responsavel_id WHERE rr.usuario_id=$1)`, [req.usuario.id]);
-  res.json(r.rows);
+  try {
+    const userId = req.usuario.id;
+    const userEmail = req.usuario.email;
+    const r = await pool.query(`
+      SELECT DISTINCT a.*, t.nome as turma 
+      FROM alunos a 
+      LEFT JOIN matriculas m ON m.aluno_id=a.id AND (m.ativo IS NULL OR m.ativo=true) 
+      LEFT JOIN turmas t ON t.id=m.turma_id 
+      WHERE a.id IN (
+        SELECT ar.aluno_id FROM aluno_responsavel ar 
+        JOIN responsaveis rr ON rr.id=ar.responsavel_id 
+        WHERE rr.usuario_id=$1 OR LOWER(rr.email)=LOWER($2) OR rr.id IN (SELECT responsavel_id FROM usuarios WHERE id=$1)
+      )
+    `, [userId, userEmail || '']);
+    res.json(r.rows);
+  } catch(e) {
+    console.error('[GET /responsavel/filhos]', e);
+    res.status(400).json({ erro: e.message });
+  }
 });
-
 // --- AVISOS ---
 app.get('/api/avisos', autenticar, async (req,res)=>{
   const r = await pool.query('SELECT * FROM avisos WHERE ativo IS NULL OR ativo=true ORDER BY created_at DESC');
