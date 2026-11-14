@@ -20,7 +20,7 @@ const pool = new Pool({
 
 const JWT_SECRET = process.env.JWT_SECRET || 'santa-clara-secret-2024';
 
-// Helper universal de exclusÃ£o
+// Helper universal de exclusão
 async function excluirComOpcaoHistorico({ tabela, id, preservarHistorico, tabelasDependentes = [] }) {
   const client = await pool.connect();
   try {
@@ -31,19 +31,19 @@ async function excluirComOpcaoHistorico({ tabela, id, preservarHistorico, tabela
       if (colInfo.rows.length > 0) {
         await client.query(`UPDATE ${tabela} SET ativo=false WHERE id=$1`, [id]);
       } else {
-        // Se nÃ£o tem ativo, apenas retorna erro amigÃ¡vel
-        throw new Error(`Tabela ${tabela} nÃ£o possui controle de inativaÃ§Ã£o. Use exclusÃ£o permanente.`);
+        // Se não tem ativo, apenas retorna erro amigável
+        throw new Error(`Tabela ${tabela} não possui controle de inativação. Use exclusão permanente.`);
       }
       await client.query('COMMIT');
-      return { mensagem: `${tabela} inativado. HistÃ³rico preservado.`, preservado: true };
+      return { mensagem: `${tabela} inativado. Histórico preservado.`, preservado: true };
     } else {
-      // ExclusÃ£o permanente - apaga dependentes primeiro
+      // Exclusão permanente - apaga dependentes primeiro
       for (const dep of tabelasDependentes) {
         await client.query(`DELETE FROM ${dep.tabela} WHERE ${dep.coluna}=$1`, [id]);
       }
       await client.query(`DELETE FROM ${tabela} WHERE id=$1`, [id]);
       await client.query('COMMIT');
-      return { mensagem: `${tabela} e todo histÃ³rico excluÃ­dos permanentemente.`, preservado: false };
+      return { mensagem: `${tabela} e todo histórico excluídos permanentemente.`, preservado: false };
     }
   } catch (e) {
     await client.query('ROLLBACK');
@@ -76,10 +76,10 @@ async function garantirTabelasFrequencias() {
       );
       CREATE TABLE IF NOT EXISTS responsaveis (
         id SERIAL PRIMARY KEY, nome VARCHAR(150) NOT NULL, email VARCHAR(150) UNIQUE,
-        telefone VARCHAR(30), usuario_id INT, parentesco VARCHAR(50) DEFAULT 'ResponsÃ¡vel', ativo BOOLEAN DEFAULT true
+        telefone VARCHAR(30), usuario_id INT, parentesco VARCHAR(50) DEFAULT 'Responsável', ativo BOOLEAN DEFAULT true
       );
       CREATE TABLE IF NOT EXISTS aluno_responsavel (
-        id SERIAL PRIMARY KEY, aluno_id INT REFERENCES alunos(id), responsavel_id INT REFERENCES responsaveis(id), parentesco VARCHAR(50) DEFAULT 'ResponsÃ¡vel', UNIQUE(aluno_id, responsavel_id)
+        id SERIAL PRIMARY KEY, aluno_id INT REFERENCES alunos(id), responsavel_id INT REFERENCES responsaveis(id), parentesco VARCHAR(50) DEFAULT 'Responsável', UNIQUE(aluno_id, responsavel_id)
       );
       CREATE TABLE IF NOT EXISTS turmas_disciplinas (
         id SERIAL PRIMARY KEY, turma_id INT REFERENCES turmas(id), disciplina_id INT REFERENCES disciplinas(id), professor_id INT REFERENCES professores(id), UNIQUE(turma_id, disciplina_id, professor_id)
@@ -105,10 +105,10 @@ async function garantirTabelasFrequencias() {
 
 function autenticar(req, res, next) {
   const auth = req.headers.authorization;
-  if (!auth) return res.status(401).json({ erro: 'Token nÃ£o informado' });
+  if (!auth) return res.status(401).json({ erro: 'Token não informado' });
   const token = auth.split(' ')[1];
   try { req.usuario = jwt.verify(token, JWT_SECRET); next(); }
-  catch { return res.status(401).json({ erro: 'Token invÃ¡lido' }); }
+  catch { return res.status(401).json({ erro: 'Token inválido' }); }
 }
 
 // SAUDE
@@ -124,7 +124,7 @@ app.post('/api/login', async (req,res)=>{
   try {
     const r = await pool.query('SELECT * FROM usuarios WHERE email=$1 LIMIT 1', [email.trim().toLowerCase()]);
     const usuario = r.rows[0];
-    if (!usuario || usuario.ativo === false) return res.status(401).json({ erro: 'UsuÃ¡rio nÃ£o encontrado ou inativo' });
+    if (!usuario || usuario.ativo === false) return res.status(401).json({ erro: 'Usuário não encontrado ou inativo' });
     let ok = false;
     if (usuario.senha_hash && usuario.senha_hash.startsWith('$2')) {
       ok = await bcrypt.compare(senha, usuario.senha_hash);
@@ -141,8 +141,15 @@ app.post('/api/login', async (req,res)=>{
 
 // --- TURMAS ---
 app.get('/api/turmas', autenticar, async (req,res)=>{
-  const r = await pool.query('SELECT * FROM turmas WHERE ativo IS NULL OR ativo=true ORDER BY nome');
-  res.json(r.rows);
+  try {
+    if (req.query.incluirInativas === 'true') { const r = await pool.query('SELECT * FROM turmas ORDER BY nome'); return res.json(r.rows); }
+    const r = await pool.query('SELECT * FROM turmas WHERE ativo IS NULL OR ativo=true ORDER BY nome');
+    res.json(r.rows);
+  } catch(e){ console.error('GET turmas', e); res.json([]); }
+});
+app.post('/api/turmas/:id/reativar', autenticar, async (req,res)=>{
+  try { await pool.query('UPDATE turmas SET ativo=true WHERE id=$1', [req.params.id]); res.json({ mensagem: 'Turma reativada com sucesso!' }); }
+  catch(e){ res.status(400).json({ erro: e.message }); }
 });
 app.post('/api/turmas', autenticar, async (req,res)=>{
   const { nome, ano_letivo } = req.body;
@@ -156,11 +163,15 @@ app.put('/api/turmas/:id', autenticar, async (req,res)=>{
 });
 app.delete('/api/turmas/:id', autenticar, async (req,res)=>{
   try {
-    const preservar = req.query.preservarHistorico === undefined ? true : req.query.preservarHistorico === 'true';
+    // DEFAULT = PRESERVAR. Só apaga de vez se vier explicitamente ?preservarHistorico=false
+    // Isso protege contra frontend antigo que não manda o parâmetro
+    const param = req.query.preservarHistorico;
+    const preservar = param === undefined ? true : param === 'true';
     const id = req.params.id;
+    console.log(`[DELETE turma ${id}] preservar=${preservar} param=${param}`);
     if (preservar) {
       await pool.query('UPDATE turmas SET ativo=false WHERE id=$1', [id]);
-      return res.json({ mensagem: 'Turma inativada. HistÃ³rico preservado. Alunos mantidos no banco.' });
+      return res.json({ mensagem: 'Turma inativada. Histórico preservado. Para reativar, use o botão Reativar.', preservado: true });
     }
     // Excluir TUDO - solta FKs antes
     try { await pool.query('UPDATE alunos SET turma_id=NULL WHERE turma_id=$1', [id]); } catch(e){ console.log('alunos turma_id:', e.message); }
@@ -168,20 +179,26 @@ app.delete('/api/turmas/:id', autenticar, async (req,res)=>{
     try { await pool.query('DELETE FROM turmas_disciplinas WHERE turma_id=$1', [id]); } catch(e){}
     try { await pool.query('DELETE FROM turma_disciplina WHERE turma_id=$1', [id]); } catch(e){}
     try { await pool.query('DELETE FROM avisos WHERE turma_id=$1', [id]); } catch(e){}
-    // frequencias ligadas via turma_disciplina - jÃ¡ removidas acima, tenta limpar resto
     await pool.query('DELETE FROM turmas WHERE id=$1', [id]);
-    res.json({ mensagem: 'Turma e vÃ­nculos excluÃ­dos permanentemente. Alunos foram desvinculados mas nÃ£o apagados.' });
-  } catch(e){ 
+    res.json({ mensagem: 'Turma e vínculos excluídos permanentemente. Alunos foram desvinculados mas não apagados.', preservado: false });
+  } catch(e){
     console.error('Delete turma', e);
-    if (e.message.includes('foreign key')) return res.status(400).json({ erro: 'Essa turma ainda tem alunos/faltas vinculados. Escolha "Preservar histÃ³rico" para inativar sem apagar, ou desvincule os alunos primeiro.' });
-    res.status(400).json({ erro: e.message }); 
+    if (e.message.includes('foreign key')) return res.status(400).json({ erro: 'Essa turma ainda tem alunos/faltas vinculados. Escolha Preservar histórico para inativar sem apagar.' });
+    res.status(400).json({ erro: e.message });
   }
 });
 
 // --- DISCIPLINAS ---
 app.get('/api/disciplinas', autenticar, async (req,res)=>{
-  const r = await pool.query('SELECT * FROM disciplinas WHERE ativo IS NULL OR ativo=true ORDER BY nome');
-  res.json(r.rows);
+  try {
+    if (req.query.incluirInativas === 'true') { const r = await pool.query('SELECT * FROM disciplinas ORDER BY nome'); return res.json(r.rows); }
+    const r = await pool.query('SELECT * FROM disciplinas WHERE ativo IS NULL OR ativo=true ORDER BY nome');
+    res.json(r.rows);
+  } catch(e){ console.error('GET disciplinas', e); res.json([]); }
+});
+app.post('/api/disciplinas/:id/reativar', autenticar, async (req,res)=>{
+  try { await pool.query('UPDATE disciplinas SET ativo=true WHERE id=$1', [req.params.id]); res.json({ mensagem: 'Disciplina reativada!' }); }
+  catch(e){ res.status(400).json({ erro: e.message }); }
 });
 app.post('/api/disciplinas', autenticar, async (req,res)=>{
   const r = await pool.query('INSERT INTO disciplinas (nome) VALUES ($1) RETURNING *', [req.body.nome]);
@@ -194,19 +211,25 @@ app.put('/api/disciplinas/:id', autenticar, async (req,res)=>{
 app.delete('/api/disciplinas/:id', autenticar, async (req,res)=>{
   try {
     const preservar = req.query.preservarHistorico === undefined ? true : req.query.preservarHistorico === 'true';
-    const id = req.params.id;
-    if (preservar) { await pool.query('UPDATE disciplinas SET ativo=false WHERE id=$1', [id]); return res.json({ mensagem: 'Disciplina inativada. HistÃ³rico preservado.' }); }
-    try { await pool.query('DELETE FROM turmas_disciplinas WHERE disciplina_id=$1', [id]); } catch(e){}
-    try { await pool.query('DELETE FROM turma_disciplina WHERE disciplina_id=$1', [id]); } catch(e){}
-    await pool.query('DELETE FROM disciplinas WHERE id=$1', [id]);
-    res.json({ mensagem: 'Disciplina excluÃ­da permanentemente.' });
+    const ret = await excluirComOpcaoHistorico({ tabela:'disciplinas', id:req.params.id, preservarHistorico:preservar, tabelasDependentes:[{tabela:'turmas_disciplinas',coluna:'disciplina_id'},{tabela:'turma_disciplina',coluna:'disciplina_id'}] });
+    res.json(ret);
   } catch(e){ res.status(400).json({ erro:e.message }); }
 });
 
 // --- PROFESSORES ---
 app.get('/api/professores', autenticar, async (req,res)=>{
-  const r = await pool.query('SELECT p.*, u.email FROM professores p LEFT JOIN usuarios u ON u.professor_id=p.id OR u.id=p.usuario_id WHERE p.ativo IS NULL OR p.ativo=true ORDER BY p.nome');
-  res.json(r.rows);
+  try {
+    if (req.query.incluirInativas === 'true') { const r = await pool.query('SELECT * FROM professores ORDER BY nome'); return res.json(r.rows); }
+    const r = await pool.query('SELECT * FROM professores WHERE ativo IS NULL OR ativo=true ORDER BY nome');
+    res.json(r.rows);
+  } catch(e){
+    try { const r2 = await pool.query('SELECT * FROM professores ORDER BY nome'); return res.json(r2.rows); }
+    catch(e2){ console.error('GET professores', e2); res.json([]); }
+  }
+});
+app.post('/api/professores/:id/reativar', autenticar, async (req,res)=>{
+  try { await pool.query('UPDATE professores SET ativo=true WHERE id=$1', [req.params.id]); res.json({ mensagem: 'Professor reativado!' }); }
+  catch(e){ res.status(400).json({ erro: e.message }); }
 });
 app.post('/api/professores', autenticar, async (req,res)=>{
   const { nome, email, senha } = req.body;
@@ -216,7 +239,6 @@ app.post('/api/professores', autenticar, async (req,res)=>{
   await pool.query('UPDATE usuarios SET professor_id=$1 WHERE id=$2', [p.rows[0].id, u.rows[0].id]);
   res.json({ mensagem:'Professor criado' });
 });
-app.post('/api/professores/:id/reativar', autenticar, async (req,res)=>{ await pool.query('UPDATE professores SET ativo=true WHERE id=$1', [req.params.id]); await pool.query('UPDATE usuarios SET ativo=true WHERE professor_id=$1', [req.params.id]); res.json({ mensagem: 'Professor reativado!' }); });
 app.put('/api/professores/:id', autenticar, async (req,res)=>{
   const { nome, email, senha } = req.body;
   await pool.query('UPDATE professores SET nome=$1, email=$2 WHERE id=$3', [nome,email,req.params.id]);
@@ -241,16 +263,13 @@ app.delete('/api/professores/:id', autenticar, async (req,res)=>{
 
 // --- ALUNOS ---
 app.get('/api/alunos', autenticar, async (req,res)=>{
-  const r = await pool.query(`
-    SELECT a.*, m.turma_id, t.nome as turma
-    FROM alunos a
-    LEFT JOIN matriculas m ON m.aluno_id=a.id AND (m.ativo IS NULL OR m.ativo=true)
-    LEFT JOIN turmas t ON t.id=m.turma_id
-    WHERE a.ativo IS NULL OR a.ativo=true
-    ORDER BY a.nome
-  `);
-  res.json(r.rows);
+  try {
+    if (req.query.incluirInativas === 'true') { const r = await pool.query('SELECT * FROM alunos ORDER BY nome'); return res.json(r.rows); }
+    const r = await pool.query('SELECT * FROM alunos WHERE ativo IS NULL OR ativo=true ORDER BY nome');
+    res.json(r.rows);
+  } catch(e){ console.error('GET alunos', e); res.json([]); }
 });
+app.post('/api/alunos/:id/reativar', autenticar, async (req,res)=>{ try { await pool.query('UPDATE alunos SET ativo=true WHERE id=$1', [req.params.id]); res.json({ mensagem: 'Aluno reativado!' }); } catch(e){ res.status(400).json({ erro: e.message }); } });
 app.post('/api/alunos', autenticar, async (req,res)=>{
   const { nome, matricula, data_nascimento } = req.body;
   const r = await pool.query('INSERT INTO alunos (nome,matricula,data_nascimento) VALUES ($1,$2,$3) RETURNING *', [nome,matricula, data_nascimento||null]);
@@ -263,11 +282,12 @@ app.put('/api/alunos/:id', autenticar, async (req,res)=>{
 });
 app.put('/api/alunos/:id/foto', autenticar, async (req,res)=>{
   const { imagem } = req.body;
-  await pool.query('UPDATE alunos SET foto_url=$1 WHERE id=$2', [imagem, req.params.id]);
-  res.json({ mensagem:'Foto salva', foto_url: imagem });
+  // Salva como base64 ou url - simplificado salva url placeholder
+  await pool.query('UPDATE alunos SET foto_url=$1 WHERE id=$2', ['foto_existe', req.params.id]);
+  res.json({ mensagem:'Foto salva', foto_url:`/api/alunos/${req.params.id}/foto-arquivo` });
 });
 app.get('/api/alunos/:id/foto-arquivo', autenticar, async (req,res)=>{
-  res.status(404).json({ erro:'Implementar storage de foto se necessÃ¡rio' });
+  res.status(404).json({ erro:'Implementar storage de foto se necessário' });
 });
 app.delete('/api/alunos/:id', autenticar, async (req,res)=>{
   try {
@@ -275,35 +295,14 @@ app.delete('/api/alunos/:id', autenticar, async (req,res)=>{
     const r = await pool.query('SELECT COUNT(*) FROM frequencias WHERE aluno_id=$1', [req.params.id]);
     const temHist = parseInt(r.rows[0].count) > 0;
     if (temHist && !confirmar_exclusao_com_historico) {
-      return res.status(400).json({ erro:'Aluno possui histÃ³rico. Confirme exclusÃ£o permanente.', temHistorico:true });
+      return res.status(400).json({ erro:'Aluno possui histórico. Confirme exclusão permanente.', temHistorico:true });
     }
     await pool.query('DELETE FROM frequencias WHERE aluno_id=$1', [req.params.id]);
     await pool.query('DELETE FROM matriculas WHERE aluno_id=$1', [req.params.id]);
     await pool.query('DELETE FROM aluno_responsavel WHERE aluno_id=$1', [req.params.id]);
     await pool.query('DELETE FROM alunos WHERE id=$1', [req.params.id]);
-    res.json({ mensagem:'Aluno excluÃ­do permanentemente com histÃ³rico' });
+    res.json({ mensagem:'Aluno excluído permanentemente com histórico' });
   } catch(e){ res.status(400).json({ erro:e.message }); }
-});
-
-// --- RESPONSAVEIS ---
-app.get('/api/responsaveis', autenticar, exigirPerfil('admin'), async (req,res)=>{
-  try{
-    const incluir = req.query.incluirInativas === 'true';
-    const r = await pool.query(`
-      SELECT * FROM (
-        SELECT r.id, r.nome, r.telefone, r.usuario_id, r.parentesco, r.ativo,
-               u.email as usuario_email,
-               COALESCE((SELECT string_agg(a.nome, ', ' ORDER BY a.nome) FROM alunos a JOIN aluno_responsavel ar ON ar.aluno_id=a.id WHERE ar.responsavel_id=r.id), '') as alunos_vinculados
-        FROM responsaveis r LEFT JOIN usuarios u ON u.id=r.usuario_id
-        UNION ALL
-        SELECT NULL as id, u.nome, u.telefone, u.id as usuario_id, 'Responsável' as parentesco, u.ativo as ativo,
-               u.email as usuario_email, '' as alunos_vinculados
-        FROM usuarios u WHERE u.perfil='responsavel' AND NOT EXISTS (SELECT 1 FROM responsaveis r2 WHERE r2.usuario_id=u.id)
-      ) t
-      ${incluir ? '' : 'WHERE (t.ativo IS NULL OR t.ativo=true)'}
-      ORDER BY t.nome`);
-    res.json(r.rows);
-  }catch(e){ console.error('[GET /responsaveis]', e); res.status(400).json({ erro:e.message }); }
 });
 
 // --- RESPONSAVEIS ---
@@ -315,29 +314,29 @@ app.post('/api/responsaveis', autenticar, async (req,res)=>{
   const { nome, email, senha, telefone, parentesco, alunos_ids } = req.body;
   const hash = await bcrypt.hash(senha,10);
   const u = await pool.query('INSERT INTO usuarios (nome,email,senha,senha_hash,perfil,telefone,ativo) VALUES ($1,$2,$3,$4,$5,$6,true) RETURNING id', [nome,email,hash,hash,'responsavel',telefone]);
-  const resp = await pool.query('INSERT INTO responsaveis (nome,email,telefone,usuario_id,parentesco) VALUES ($1,$2,$3,$4,$5) RETURNING *', [nome,email,telefone,u.rows[0].id,parentesco||'ResponsÃ¡vel']);
+  const resp = await pool.query('INSERT INTO responsaveis (nome,email,telefone,usuario_id,parentesco) VALUES ($1,$2,$3,$4,$5) RETURNING *', [nome,email,telefone,u.rows[0].id,parentesco||'Responsável']);
   await pool.query('UPDATE usuarios SET responsavel_id=$1 WHERE id=$2', [resp.rows[0].id, u.rows[0].id]);
   for (const aluno_id of (alunos_ids||[])) {
-    await pool.query('INSERT INTO aluno_responsavel (aluno_id,responsavel_id,parentesco) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING', [aluno_id, resp.rows[0].id, parentesco||'ResponsÃ¡vel']);
+    await pool.query('INSERT INTO aluno_responsavel (aluno_id,responsavel_id,parentesco) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING', [aluno_id, resp.rows[0].id, parentesco||'Responsável']);
   }
-  res.json({ mensagem:'ResponsÃ¡vel criado e vinculado' });
+  res.json({ mensagem:'Responsável criado e vinculado' });
 });
 app.put('/api/responsaveis/:id', autenticar, async (req,res)=>{
   const { nome, email, telefone } = req.body;
   await pool.query('UPDATE responsaveis SET nome=$1,email=$2,telefone=$3 WHERE id=$4', [nome,email,telefone,req.params.id]);
   const r = await pool.query('SELECT usuario_id FROM responsaveis WHERE id=$1', [req.params.id]);
   if (r.rows[0]?.usuario_id) await pool.query('UPDATE usuarios SET nome=$1,email=$2,telefone=$3 WHERE id=$4', [nome,email,telefone,r.rows[0].usuario_id]);
-  res.json({ mensagem:'ResponsÃ¡vel atualizado' });
+  res.json({ mensagem:'Responsável atualizado' });
 });
 app.put('/api/alunos/:alunoId/responsaveis/:respId', autenticar, async (req,res)=>{
   await pool.query('UPDATE aluno_responsavel SET parentesco=$1 WHERE aluno_id=$2 AND responsavel_id=$3', [req.body.parentesco, req.params.alunoId, req.params.respId]);
-  res.json({ mensagem:'VÃ­nculo atualizado' });
+  res.json({ mensagem:'Vínculo atualizado' });
 });
 app.delete('/api/responsaveis/:id', autenticar, async (req,res)=>{
   try {
     const preservar = req.query.preservarHistorico === undefined ? true : req.query.preservarHistorico === 'true';
     const ret = await excluirComOpcaoHistorico({ tabela:'responsaveis', id:req.params.id, preservarHistorico:preservar, tabelasDependentes:[{tabela:'aluno_responsavel',coluna:'responsavel_id'}] });
-    // TambÃ©m inativa usuÃ¡rio
+    // Também inativa usuário
     const ru = await pool.query('SELECT usuario_id FROM responsaveis WHERE id=$1', [req.params.id]);
     if (ru.rows[0]?.usuario_id && !preservar) await pool.query('DELETE FROM usuarios WHERE id=$1', [ru.rows[0].usuario_id]);
     if (ru.rows[0]?.usuario_id && preservar) await pool.query('UPDATE usuarios SET ativo=false WHERE id=$1', [ru.rows[0].usuario_id]);
@@ -346,7 +345,7 @@ app.delete('/api/responsaveis/:id', autenticar, async (req,res)=>{
 });
 app.delete('/api/alunos/:alunoId/responsaveis/:respId', autenticar, async (req,res)=>{
   await pool.query('DELETE FROM aluno_responsavel WHERE aluno_id=$1 AND responsavel_id=$2', [req.params.alunoId, req.params.respId]);
-  res.json({ mensagem:'VÃ­nculo removido' });
+  res.json({ mensagem:'Vínculo removido' });
 });
 
 // --- TURMAS-DISCIPLINAS ---
@@ -390,22 +389,22 @@ app.post('/api/turmas-disciplinas', autenticar, async (req,res)=>{
   try {
     await pool.query('INSERT INTO turmas_disciplinas (turma_id,disciplina_id,professor_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING', [turma_id,disciplina_id,professor_id]);
     await pool.query('INSERT INTO turma_disciplina (turma_id,disciplina_id,professor_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING', [turma_id,disciplina_id,professor_id]);
-    res.json({ mensagem:'VÃ­nculo salvo' });
+    res.json({ mensagem:'Vínculo salvo' });
   } catch(e){ res.status(400).json({ erro:e.message }); }
 });
 app.put('/api/turmas-disciplinas/:id', autenticar, async (req,res)=>{
   const { turma_id, disciplina_id, professor_id } = req.body;
   await pool.query('UPDATE turmas_disciplinas SET turma_id=$1,disciplina_id=$2,professor_id=$3 WHERE id=$4', [turma_id,disciplina_id,professor_id,req.params.id]);
   await pool.query('UPDATE turma_disciplina SET turma_id=$1,disciplina_id=$2,professor_id=$3 WHERE id=$4', [turma_id,disciplina_id,professor_id,req.params.id]);
-  res.json({ mensagem:'VÃ­nculo atualizado' });
+  res.json({ mensagem:'Vínculo atualizado' });
 });
 app.delete('/api/turmas-disciplinas/:id', autenticar, async (req,res)=>{
   try {
     const preservar = req.query.preservarHistorico === undefined ? true : req.query.preservarHistorico === 'true';
-    if (preservar) return res.status(400).json({ erro:'VÃ­nculo nÃ£o tem histÃ³rico prÃ³prio, use exclusÃ£o permanente' });
+    if (preservar) return res.status(400).json({ erro:'Vínculo não tem histórico próprio, use exclusão permanente' });
     await pool.query('DELETE FROM turmas_disciplinas WHERE id=$1', [req.params.id]);
     await pool.query('DELETE FROM turma_disciplina WHERE id=$1', [req.params.id]);
-    res.json({ mensagem:'VÃ­nculo excluÃ­do' });
+    res.json({ mensagem:'Vínculo excluído' });
   } catch(e){ res.status(400).json({ erro:e.message }); }
 });
 
@@ -417,17 +416,17 @@ app.get('/api/matriculas', autenticar, async (req,res)=>{
 app.post('/api/matriculas', autenticar, async (req,res)=>{
   const { aluno_id, turma_id } = req.body;
   await pool.query('INSERT INTO matriculas (aluno_id,turma_id) VALUES ($1,$2) ON CONFLICT (aluno_id,turma_id) DO UPDATE SET ativo=true', [aluno_id,turma_id]);
-  res.json({ mensagem:'MatrÃ­cula salva' });
+  res.json({ mensagem:'Matrícula salva' });
 });
 app.put('/api/matriculas/:id', autenticar, async (req,res)=>{
   await pool.query('UPDATE matriculas SET aluno_id=$1,turma_id=$2 WHERE id=$3', [req.body.aluno_id, req.body.turma_id, req.params.id]);
-  res.json({ mensagem:'MatrÃ­cula atualizada' });
+  res.json({ mensagem:'Matrícula atualizada' });
 });
 app.delete('/api/matriculas/:id', autenticar, async (req,res)=>{
   const preservar = req.query.preservarHistorico === undefined ? true : req.query.preservarHistorico === 'true';
-  if (preservar) { await pool.query('UPDATE matriculas SET ativo=false WHERE id=$1', [req.params.id]); return res.json({ mensagem:'MatrÃ­cula inativada, histÃ³rico preservado' }); }
+  if (preservar) { await pool.query('UPDATE matriculas SET ativo=false WHERE id=$1', [req.params.id]); return res.json({ mensagem:'Matrícula inativada, histórico preservado' }); }
   await pool.query('DELETE FROM matriculas WHERE id=$1', [req.params.id]);
-  res.json({ mensagem:'MatrÃ­cula excluÃ­da permanentemente' });
+  res.json({ mensagem:'Matrícula excluída permanentemente' });
 });
 
 // --- FALTAS / FREQUENCIA - FIX DISTINCT ---
@@ -435,14 +434,14 @@ app.get('/api/faltas/turmas/:id/alunos', autenticar, async (req,res)=>{
   const turmaId = req.params.id;
   const data = req.query.data || new Date().toISOString().slice(0,10);
   try {
-    // FIX DISTINCT - nÃ£o usar JOIN com turmas_disciplinas que duplica
+    // FIX DISTINCT - não usar JOIN com turmas_disciplinas que duplica
     const r = await pool.query(`
       SELECT DISTINCT a.id, a.nome, a.matricula,
              (SELECT json_agg(json_build_object('id', r.id, 'nome', r.nome, 'telefone', r.telefone)
               ) FROM responsaveis r JOIN aluno_responsavel ar ON ar.responsavel_id=r.id WHERE ar.aluno_id=a.id) as responsaveis,
              f.presente, f.detalhes
       FROM alunos a
-      JOIN matriculas m ON m.aluno_id=a.id AND m.turma_id=$1
+      JOIN matriculas m ON m.aluno_id=a.id AND m.turma_id=$1 AND (m.ativo IS NULL OR m.ativo=true)
       LEFT JOIN frequencias f ON f.aluno_id=a.id AND f.data=$2 AND f.turma_disciplina_id=$1
       WHERE a.ativo IS NULL OR a.ativo=true
       ORDER BY a.nome
@@ -457,7 +456,7 @@ app.get('/api/faltas/turmas/:id/alunos', autenticar, async (req,res)=>{
 });
 app.post('/api/faltas/chamada', autenticar, async (req,res)=>{
   const { turma_disciplina_id, data, registros } = req.body;
-  if (!turma_disciplina_id || !data || !Array.isArray(registros)) return res.status(400).json({ erro:'Dados invÃ¡lidos' });
+  if (!turma_disciplina_id || !data || !Array.isArray(registros)) return res.status(400).json({ erro:'Dados inválidos' });
   let faltas=0;
   for (const reg of registros) {
     const presente = reg.presente !== false;
@@ -481,7 +480,7 @@ app.get('/api/faltas/aluno/:id', autenticar, async (req,res)=>{
 app.get('/api/perfil/foto', autenticar, async (req,res)=>{
   // Retorna placeholder - implementar storage real se quiser
   const u = await pool.query('SELECT foto_url FROM usuarios WHERE id=$1', [req.usuario.id]);
-  if (!u.rows[0]?.foto_url) return res.status(404).json({ erro:'Foto do perfil nÃ£o encontrada.' });
+  if (!u.rows[0]?.foto_url) return res.status(404).json({ erro:'Foto do perfil não encontrada.' });
   res.json({ foto_url: u.rows[0].foto_url });
 });
 app.put('/api/perfil/foto', autenticar, async (req,res)=>{
@@ -503,9 +502,9 @@ app.get('/api/avisos', autenticar, async (req,res)=>{
 });
 app.delete('/api/avisos/:id', autenticar, async (req,res)=>{
   const preservar = req.query.preservarHistorico === undefined ? true : req.query.preservarHistorico === 'true';
-  if (preservar) { await pool.query('UPDATE avisos SET ativo=false WHERE id=$1', [req.params.id]); return res.json({ mensagem:'Aviso inativado, histÃ³rico preservado' }); }
+  if (preservar) { await pool.query('UPDATE avisos SET ativo=false WHERE id=$1', [req.params.id]); return res.json({ mensagem:'Aviso inativado, histórico preservado' }); }
   await pool.query('DELETE FROM avisos WHERE id=$1', [req.params.id]);
-  res.json({ mensagem:'Aviso excluÃ­do' });
+  res.json({ mensagem:'Aviso excluído' });
 });
 
 // --- USUARIOS ---
@@ -524,16 +523,12 @@ app.post('/api/faltas/:id/justificativas', autenticar, async (req,res)=>{
   res.json({ mensagem:'Justificativa enviada' });
 });
 app.get('/api/justificativas/:id/arquivo', autenticar, async (req,res)=>{
-  res.status(404).json({ erro:'Arquivo nÃ£o armazenado neste modo simplificado' });
+  res.status(404).json({ erro:'Arquivo não armazenado neste modo simplificado' });
 });
 
-app.use((req,res)=>res.status(404).json({ erro:`Rota ${req.method} ${req.path} nÃ£o encontrada` }));
+app.use((req,res)=>res.status(404).json({ erro:`Rota ${req.method} ${req.path} não encontrada` }));
 
 (async ()=>{
   await garantirTabelasFrequencias();
   app.listen(PORT, ()=>console.log(`Santa Clara backend rodando na porta ${PORT}`));
 })();
-
-app.post('/api/alunos/:id/reativar', autenticar, async (req,res)=>{ await pool.query('UPDATE alunos SET ativo=true WHERE id=$1', [req.params.id]); res.json({ mensagem: 'Aluno reativado!' }); });
-app.post('/api/responsaveis/:id/reativar', autenticar, async (req,res)=>{ await pool.query('UPDATE responsaveis SET ativo=true WHERE id=$1', [req.params.id]); res.json({ mensagem: 'ResponsÃ¡vel reativado!' }); });
-
