@@ -535,7 +535,13 @@ app.put('/api/perfil/foto', autenticar, async (req,res)=>{
 
 // --- RESPONSAVEL / FILHOS ---
 app.get('/api/responsavel/filhos', autenticar, async (req,res)=>{
-  const r = await pool.query(`SELECT a.*, t.nome as turma FROM alunos a LEFT JOIN matriculas m ON m.aluno_id=a.id AND (m.ativo IS NULL OR m.ativo=true) LEFT JOIN turmas t ON t.id=m.turma_id WHERE a.id IN (SELECT ar.aluno_id FROM aluno_responsavel ar JOIN responsaveis rr ON rr.id=ar.responsavel_id WHERE rr.usuario_id=$1)`, [req.usuario.id]);
+  const r = await pool.query(`
+    SELECT a.*,
+           (SELECT t.nome FROM matriculas m2 JOIN turmas t ON t.id = m2.turma_id WHERE m2.aluno_id = a.id AND (m2.ativo IS NULL OR m2.ativo = true) ORDER BY m2.id DESC LIMIT 1) as turma
+    FROM alunos a
+    WHERE a.id IN (SELECT ar.aluno_id FROM aluno_responsavel ar JOIN responsaveis rr ON rr.id=ar.responsavel_id WHERE rr.usuario_id=$1)
+    ORDER BY a.nome
+  `, [req.usuario.id]);
   res.json(r.rows);
 });
 
