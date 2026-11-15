@@ -12,6 +12,10 @@ app.use(cors({ origin: '*', methods: ['GET','POST','PUT','DELETE','OPTIONS'], al
 app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true }));
 
+// Serve o front (responsavel.html, responsavel-perfil.js) da mesma pasta do server.js
+// Se seu front está no Vercel / pasta separada, pode ignorar estas 2 linhas
+app.use(express.static(__dirname));
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_URL?.includes('supabase') ? { rejectUnauthorized: false } : false
@@ -563,8 +567,9 @@ app.get('/api/faltas/aluno/:id', autenticar, async (req,res)=>{
 // --- PERFIL FOTO (foto do próprio usuário logado) ---
 app.get('/api/perfil/foto', autenticar, async (req,res)=>{
   const u = await pool.query('SELECT foto_url FROM usuarios WHERE id=$1', [req.usuario.id]);
-  if (!u.rows[0]?.foto_url) return res.status(404).json({ erro:'Foto do perfil não encontrada.' });
-  res.json({ foto_url: u.rows[0].foto_url });
+  // CORREÇÃO: sem foto ainda NÃO é erro — retorna 200 com null para o front
+  // não mostrar "Failed to load resource: 404" no Console.
+  res.json({ foto_url: u.rows[0]?.foto_url || null });
 });
 app.put('/api/perfil/foto', autenticar, async (req,res)=>{
   try {
@@ -604,7 +609,7 @@ app.get('/api/responsavel/filhos/:id/foto', autenticar, async (req,res)=>{
 });
 
 // --- RESPONSAVEL / FILHOS ---
-: turma vem da matrícula ATIVA ---
+// --- RESPONSAVEL / FILHOS: turma vem da matrícula ATIVA ---
 // Antes: JOIN com matriculas podia trazer 2 turmas (ex: 9º A e 6º B) e o front pegava a primeira aleatória
 // Agora: subquery pega SÓ a matrícula ativa mais recente por aluno
 app.get('/api/responsavel/filhos', autenticar, async (req,res)=>{
@@ -626,6 +631,28 @@ app.get('/api/responsavel/filhos', autenticar, async (req,res)=>{
     ORDER BY a.nome
   `, [req.usuario.id]);
   res.json(r.rows);
+});
+
+// CORREÇÃO: faltava esta rota — academic.js chama GET /api/responsavel/professores
+// para listar os professores das turmas dos filhos do responsável logado.
+// Antes retornava 404 e a lista vinha vazia.
+app.get('/api/responsavel/professores', autenticar, async (req,res)=>{
+  try {
+    const r = await pool.query(`
+      SELECT DISTINCT p.id, p.nome, p.email, u.telefone, d.nome AS disciplina, t.nome AS turma, t.id AS turma_id
+      FROM turmas_disciplinas td
+      JOIN professores p ON p.id = td.professor_id
+      LEFT JOIN usuarios u ON u.id = p.usuario_id
+      JOIN disciplinas d ON d.id = td.disciplina_id
+      JOIN turmas t ON t.id = td.turma_id
+      JOIN matriculas m ON m.turma_id = t.id AND (m.ativo IS NULL OR m.ativo = true)
+      JOIN aluno_responsavel ar ON ar.aluno_id = m.aluno_id
+      JOIN responsaveis rr ON rr.id = ar.responsavel_id
+      WHERE rr.usuario_id = $1 AND (p.ativo IS NULL OR p.ativo = true)
+      ORDER BY t.nome, d.nome, p.nome
+    `, [req.usuario.id]);
+    res.json(r.rows);
+  } catch(e){ console.error(e); res.status(500).json({ erro:'Falha ao carregar professores.' }); }
 });
 
 // Lista turmas do responsável (para o seletor não divergir do card)
