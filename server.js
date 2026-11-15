@@ -95,6 +95,18 @@ async function garantirTabelasFrequencias() {
       CREATE TABLE IF NOT EXISTS justificativas (
         id SERIAL PRIMARY KEY, falta_id INT REFERENCES frequencias(id) ON DELETE CASCADE, nome_original VARCHAR(255), mime_type VARCHAR(100), dados BYTEA, created_at TIMESTAMPTZ DEFAULT NOW()
       );
+      CREATE TABLE IF NOT EXISTS notas (
+        id SERIAL PRIMARY KEY,
+        aluno_id INT REFERENCES alunos(id) ON DELETE CASCADE,
+        turma_id INT REFERENCES turmas(id),
+        disciplina_id INT REFERENCES disciplinas(id),
+        turma_disciplina_id INT,
+        bimestre INT DEFAULT 1,
+        valor NUMERIC(5,2) DEFAULT 0,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE(aluno_id, disciplina_id, bimestre)
+      );
     `);
   } catch (e) { console.log('Aviso garantirTabelas:', e.message); }
 }
@@ -568,9 +580,114 @@ app.put('/api/perfil/foto', autenticar, async (req,res)=>{
 });
 
 // --- RESPONSAVEL / FILHOS ---
+// --- RESPONSAVEL / FILHOS - CORRIGIDO: turma vem da matrícula ATIVA ---
+// Antes: JOIN com matriculas podia trazer 2 turmas (ex: 9º A e 6º B) e o front pegava a primeira aleatória
+// Agora: subquery pega SÓ a matrícula ativa mais recente por aluno
 app.get('/api/responsavel/filhos', autenticar, async (req,res)=>{
-  const r = await pool.query(`SELECT a.*, t.nome as turma FROM alunos a LEFT JOIN matriculas m ON m.aluno_id=a.id AND (m.ativo IS NULL OR m.ativo=true) LEFT JOIN turmas t ON t.id=m.turma_id WHERE a.id IN (SELECT ar.aluno_id FROM aluno_responsavel ar JOIN responsaveis rr ON rr.id=ar.responsavel_id WHERE rr.usuario_id=$1)`, [req.usuario.id]);
+  const r = await pool.query(`
+    SELECT a.*,
+      t.nome as turma,
+      t.id as turma_id,
+      m.id as matricula_id
+    FROM alunos a
+    LEFT JOIN LATERAL (
+      SELECT m2.turma_id, m2.id
+      FROM matriculas m2
+      WHERE m2.aluno_id = a.id AND (m2.ativo IS NULL OR m2.ativo = true)
+      ORDER BY m2.id DESC
+      LIMIT 1
+    ) m ON true
+    LEFT JOIN turmas t ON t.id = m.turma_id
+    WHERE a.id IN (SELECT ar.aluno_id FROM aluno_responsavel ar JOIN responsaveis rr ON rr.id=ar.responsavel_id WHERE rr.usuario_id=$1)
+    ORDER BY a.nome
+  `, [req.usuario.id]);
   res.json(r.rows);
+});
+
+// Lista turmas do responsável (para o seletor não divergir do card)
+app.get('/api/responsavel/filhos/:alunoId/turma', autenticar, async (req,res)=>{
+  const r = await pool.query(`
+    SELECT t.* FROM turmas t
+    JOIN matriculas m ON m.turma_id = t.id
+    WHERE m.aluno_id=$1 AND (m.ativo IS NULL OR m.ativo=true)
+    ORDER BY m.id DESC LIMIT 1
+  `, [req.params.alunoId]);
+  res.json(r.rows[0] || null);
+});
+
+// ============================================================
+// NOTAS - CORREÇÃO: rota GET /api/notas não existia
+// ============================================================
+app.get('/api/notas', autenticar, async (req,res)=>{
+  try {
+    const { aluno_id, turma_id, disciplina_id, bimestre } = req.query;
+    let q = `SELECT n.*, a.nome as aluno, d.nome as disciplina, t.nome as turma
+             FROM notas n
+             LEFT JOIN alunos a ON a.id=n.aluno_id
+             LEFT JOIN disciplinas d ON d.id=n.disciplina_id
+             LEFT JOIN turmas t ON t.id=n.turma_id
+             WHERE 1=1`;
+    const params = [];
+    if (aluno_id) { params.push(aluno_id); q += ` AND n.aluno_id=$${params.length}`; }
+    if (turma_id) { params.push(turma_id); q += ` AND n.turma_id=$${params.length}`; }
+    if (disciplina_id) { params.push(disciplina_id); q += ` AND n.disciplina_id=$${params.length}`; }
+    if (bimestre) { params.push(bimestre); q += ` AND n.bimestre=$${params.length}`; }
+    // Responsável só vê os próprios filhos
+    if (req.usuario.perfil === 'responsavel') {
+      q += ` AND n.aluno_id IN (SELECT ar.aluno_id FROM aluno_responsavel ar JOIN responsaveis rr ON rr.id=ar.responsavel_id WHERE rr.usuario_id=$${params.length+1})`;
+      params.push(req.usuario.id);
+    }
+    q += ` ORDER BY n.bimestre, d.nome`;
+    const r = await pool.query(q, params);
+    res.json(r.rows);
+  } catch(e){ console.error('GET notas', e); res.status(500).json({ erro: e.message }); }
+});
+
+// Média por disciplina para o perfil do responsável
+app.get('/api/notas/aluno/:id', autenticar, async (req,res)=>{
+  try {
+    const r = await pool.query(`
+      SELECT d.id as disciplina_id, d.nome as disciplina, AVG(n.valor) as media, COUNT(n.id) as total
+      FROM notas n JOIN disciplinas d ON d.id=n.disciplina_id
+      WHERE n.aluno_id=$1 GROUP BY d.id, d.nome ORDER BY d.nome
+    `, [req.params.id]);
+    const geral = await pool.query(`SELECT AVG(valor) as media_geral, COUNT(*) as total FROM notas WHERE aluno_id=$1`, [req.params.id]);
+    const detalhadas = await pool.query(`SELECT n.*, d.nome as disciplina FROM notas n JOIN disciplinas d ON d.id=n.disciplina_id WHERE n.aluno_id=$1 ORDER BY d.nome, n.bimestre`, [req.params.id]);
+    res.json({ media_geral: geral.rows[0]?.media_geral || null, total: parseInt(geral.rows[0]?.total||0), por_disciplina: r.rows, notas: detalhadas.rows });
+  } catch(e){ res.status(500).json({ erro: e.message }); }
+});
+
+// Lançar / atualizar nota (professor / admin)
+app.post('/api/notas', autenticar, async (req,res)=>{
+  try {
+    const { aluno_id, turma_id, disciplina_id, turma_disciplina_id, bimestre, valor } = req.body;
+    if (!aluno_id || !disciplina_id || valor === undefined) return res.status(400).json({ erro: 'Informe aluno, disciplina e valor' });
+    // Se não veio turma_id, busca da matrícula ativa do aluno - NÃO confia no front
+    let turmaFinal = turma_id;
+    if (!turmaFinal) {
+      const m = await pool.query(`SELECT turma_id FROM matriculas WHERE aluno_id=$1 AND (ativo IS NULL OR ativo=true) ORDER BY id DESC LIMIT 1`, [aluno_id]);
+      turmaFinal = m.rows[0]?.turma_id || null;
+    }
+    const r = await pool.query(`
+      INSERT INTO notas (aluno_id, turma_id, disciplina_id, turma_disciplina_id, bimestre, valor, updated_at)
+      VALUES ($1,$2,$3,$4,$5,$6,NOW())
+      ON CONFLICT (aluno_id, disciplina_id, bimestre)
+      DO UPDATE SET valor=$6, turma_id=$2, turma_disciplina_id=$4, updated_at=NOW()
+      RETURNING *
+    `, [aluno_id, turmaFinal, disciplina_id, turma_disciplina_id||null, bimestre||1, valor]);
+    res.json({ mensagem: 'Nota lançada', nota: r.rows[0] });
+  } catch(e){ console.error('POST notas', e); res.status(400).json({ erro: e.message }); }
+});
+
+app.put('/api/notas/:id', autenticar, async (req,res)=>{
+  const { valor, bimestre } = req.body;
+  await pool.query('UPDATE notas SET valor=COALESCE($1,valor), bimestre=COALESCE($2,bimestre), updated_at=NOW() WHERE id=$3', [valor, bimestre, req.params.id]);
+  res.json({ mensagem: 'Nota atualizada' });
+});
+
+app.delete('/api/notas/:id', autenticar, async (req,res)=>{
+  await pool.query('DELETE FROM notas WHERE id=$1', [req.params.id]);
+  res.json({ mensagem: 'Nota excluída' });
 });
 
 // --- AVISOS ---
