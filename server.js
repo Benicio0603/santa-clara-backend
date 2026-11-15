@@ -1,4 +1,3 @@
-
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -26,18 +25,15 @@ async function excluirComOpcaoHistorico({ tabela, id, preservarHistorico, tabela
   try {
     await client.query('BEGIN');
     if (preservarHistorico) {
-      // Verifica se tem coluna ativo
       const colInfo = await client.query(`SELECT column_name FROM information_schema.columns WHERE table_name=$1 AND column_name='ativo'`, [tabela]);
       if (colInfo.rows.length > 0) {
         await client.query(`UPDATE ${tabela} SET ativo=false WHERE id=$1`, [id]);
       } else {
-        // Se não tem ativo, apenas retorna erro amigável
         throw new Error(`Tabela ${tabela} não possui controle de inativação. Use exclusão permanente.`);
       }
       await client.query('COMMIT');
       return { mensagem: `${tabela} inativado. Histórico preservado.`, preservado: true };
     } else {
-      // Exclusão permanente - apaga dependentes primeiro
       for (const dep of tabelasDependentes) {
         await client.query(`DELETE FROM ${dep.tabela} WHERE ${dep.coluna}=$1`, [id]);
       }
@@ -125,7 +121,6 @@ app.post('/api/login', async (req,res)=>{
     let identifier = email.trim();
     let r = await pool.query('SELECT * FROM usuarios WHERE LOWER(email)=LOWER($1) LIMIT 1', [identifier]);
     let usuario = r.rows[0];
-
     if (!usuario) {
       const searchTerm = '%' + identifier + '%';
       const studentMatch = await pool.query(`
@@ -138,21 +133,13 @@ app.post('/api/login', async (req,res)=>{
         WHERE LOWER(a.nome) LIKE LOWER($1) OR LOWER(a.nome || ' ' || COALESCE(t.nome,'')) LIKE LOWER($1)
         LIMIT 1
       `, [searchTerm]);
-      
-      if (studentMatch.rows.length > 0) {
-        usuario = studentMatch.rows[0];
-      }
+      if (studentMatch.rows.length > 0) usuario = studentMatch.rows[0];
     }
-
     if (!usuario || usuario.ativo === false) return res.status(401).json({ erro: 'Usuário não encontrado ou inativo' });
     let ok = false;
-    if (usuario.senha_hash && usuario.senha_hash.startsWith('$2')) {
-      ok = await bcrypt.compare(senha, usuario.senha_hash);
-    } else if (usuario.senha && usuario.senha.startsWith('$2')) {
-      ok = await bcrypt.compare(senha, usuario.senha);
-    } else {
-      ok = senha === usuario.senha || senha === usuario.senha_hash;
-    }
+    if (usuario.senha_hash && usuario.senha_hash.startsWith('$2')) ok = await bcrypt.compare(senha, usuario.senha_hash);
+    else if (usuario.senha && usuario.senha.startsWith('$2')) ok = await bcrypt.compare(senha, usuario.senha);
+    else ok = senha === usuario.senha || senha === usuario.senha_hash;
     if (!ok) return res.status(401).json({ erro: 'Senha incorreta' });
     const token = jwt.sign({ id: usuario.id, perfil: usuario.perfil, email: usuario.email }, JWT_SECRET, { expiresIn: '12h' });
     res.json({ token, usuario: { id: usuario.id, nome: usuario.nome, email: usuario.email, perfil: usuario.perfil } });
@@ -183,8 +170,6 @@ app.put('/api/turmas/:id', autenticar, async (req,res)=>{
 });
 app.delete('/api/turmas/:id', autenticar, async (req,res)=>{
   try {
-    // DEFAULT = PRESERVAR. Só apaga de vez se vier explicitamente ?preservarHistorico=false
-    // Isso protege contra frontend antigo que não manda o parâmetro
     const param = req.query.preservarHistorico;
     const preservar = param === undefined ? true : param === 'true';
     const id = req.params.id;
@@ -193,7 +178,6 @@ app.delete('/api/turmas/:id', autenticar, async (req,res)=>{
       await pool.query('UPDATE turmas SET ativo=false WHERE id=$1', [id]);
       return res.json({ mensagem: 'Turma inativada. Histórico preservado. Para reativar, use o botão Reativar.', preservado: true });
     }
-    // Excluir TUDO - solta FKs antes
     try { await pool.query('UPDATE alunos SET turma_id=NULL WHERE turma_id=$1', [id]); } catch(e){ console.log('alunos turma_id:', e.message); }
     try { await pool.query('DELETE FROM matriculas WHERE turma_id=$1', [id]); } catch(e){}
     try { await pool.query('DELETE FROM turmas_disciplinas WHERE turma_id=$1', [id]); } catch(e){}
@@ -300,15 +284,70 @@ app.put('/api/alunos/:id', autenticar, async (req,res)=>{
   await pool.query('UPDATE alunos SET nome=$1,matricula=$2,data_nascimento=$3 WHERE id=$4', [nome,matricula,data_nascimento||null,req.params.id]);
   res.json({ mensagem:'Aluno atualizado' });
 });
+
+// ============================================================
+// CORREÇÃO: FOTO DO ALUNO - PERFIL DO RESPONSÁVEL
+// Antes: salvava 'foto_existe' e GET retornava 404
+// Agora: salva o base64 real e devolve a imagem
+// ============================================================
 app.put('/api/alunos/:id/foto', autenticar, async (req,res)=>{
-  const { imagem } = req.body;
-  // Salva como base64 ou url - simplificado salva url placeholder
-  await pool.query('UPDATE alunos SET foto_url=$1 WHERE id=$2', ['foto_existe', req.params.id]);
-  res.json({ mensagem:'Foto salva', foto_url:`/api/alunos/${req.params.id}/foto-arquivo` });
+  try {
+    const { imagem, foto_url } = req.body;
+    const foto = imagem || foto_url;
+    if (!foto) return res.status(400).json({ erro: 'Nenhuma imagem enviada' });
+
+    // Segurança: responsável só pode trocar foto do próprio filho
+    if (req.usuario.perfil === 'responsavel') {
+      const check = await pool.query(`
+        SELECT 1 FROM aluno_responsavel ar
+        JOIN responsaveis r ON r.id = ar.responsavel_id
+        WHERE ar.aluno_id = $1 AND r.usuario_id = $2
+      `, [req.params.id, req.usuario.id]);
+      if (check.rows.length === 0) return res.status(403).json({ erro: 'Você não tem permissão para trocar a foto deste aluno' });
+    }
+
+    await pool.query('UPDATE alunos SET foto_url=$1 WHERE id=$2', [foto, req.params.id]);
+    res.json({ mensagem:'Foto salva', foto_url: foto });
+  } catch(e) {
+    console.error('[PUT /alunos/:id/foto]', e);
+    res.status(400).json({ erro: e.message });
+  }
 });
+
 app.get('/api/alunos/:id/foto-arquivo', autenticar, async (req,res)=>{
-  res.status(404).json({ erro:'Implementar storage de foto se necessário' });
+  try {
+    const r = await pool.query('SELECT foto_url FROM alunos WHERE id=$1', [req.params.id]);
+    const foto = r.rows[0]?.foto_url;
+    if (!foto || foto === 'foto_existe') return res.status(404).json({ erro:'Foto não encontrada' });
+    if (foto.startsWith('data:image')) {
+      const [header, data] = foto.split(',');
+      const mime = header.match(/data:(.*);/)?.[1] || 'image/jpeg';
+      return res.set('Content-Type', mime).send(Buffer.from(data, 'base64'));
+    }
+    // Se for URL externa, redireciona
+    if (foto.startsWith('http')) return res.redirect(foto);
+    res.json({ foto_url: foto });
+  } catch(e) {
+    res.status(400).json({ erro: e.message });
+  }
 });
+
+// DELETE foto do aluno (volta para sem foto)
+app.delete('/api/alunos/:id/foto', autenticar, async (req,res)=>{
+  try {
+    if (req.usuario.perfil === 'responsavel') {
+      const check = await pool.query(`
+        SELECT 1 FROM aluno_responsavel ar
+        JOIN responsaveis r ON r.id = ar.responsavel_id
+        WHERE ar.aluno_id = $1 AND r.usuario_id = $2
+      `, [req.params.id, req.usuario.id]);
+      if (check.rows.length === 0) return res.status(403).json({ erro: 'Sem permissão' });
+    }
+    await pool.query('UPDATE alunos SET foto_url=NULL WHERE id=$1', [req.params.id]);
+    res.json({ mensagem:'Foto removida' });
+  } catch(e){ res.status(400).json({ erro:e.message }); }
+});
+
 app.delete('/api/alunos/:id', autenticar, async (req,res)=>{
   try {
     const { confirmar_exclusao_com_historico } = req.body || {};
@@ -375,7 +414,6 @@ app.delete('/api/responsaveis/:id', autenticar, async (req,res)=>{
   try {
     const preservar = req.query.preservarHistorico === undefined ? true : req.query.preservarHistorico === 'true';
     const ret = await excluirComOpcaoHistorico({ tabela:'responsaveis', id:req.params.id, preservarHistorico:preservar, tabelasDependentes:[{tabela:'aluno_responsavel',coluna:'responsavel_id'}] });
-    // Também inativa usuário
     const ru = await pool.query('SELECT usuario_id FROM responsaveis WHERE id=$1', [req.params.id]);
     if (ru.rows[0]?.usuario_id && !preservar) await pool.query('DELETE FROM usuarios WHERE id=$1', [ru.rows[0].usuario_id]);
     if (ru.rows[0]?.usuario_id && preservar) await pool.query('UPDATE usuarios SET ativo=false WHERE id=$1', [ru.rows[0].usuario_id]);
@@ -405,13 +443,11 @@ app.get('/api/turmas-disciplinas/todos', autenticar, async (req,res)=>{
     LEFT JOIN professores p ON p.id=td.professor_id
     ORDER BY turma
   `);
-  // Remove duplicatas por id+turma+disciplina+prof
   const map = new Map();
   for (const row of r.rows) { const k=`${row.turma_id}-${row.disciplina_id}-${row.professor_id}`; if(!map.has(k)) map.set(k,row); }
   res.json(Array.from(map.values()));
 });
 app.get('/api/turmas-disciplinas/minhas', autenticar, async (req,res)=>{
-  // professor logado
   let profId = null;
   if (req.usuario.perfil === 'professor') {
     const pr = await pool.query('SELECT id FROM professores WHERE usuario_id=$1 OR id=$2', [req.usuario.id, req.usuario.professor_id||0]);
@@ -468,12 +504,11 @@ app.delete('/api/matriculas/:id', autenticar, async (req,res)=>{
   res.json({ mensagem:'Matrícula excluída permanentemente' });
 });
 
-// --- FALTAS / FREQUENCIA - FIX DISTINCT ---
+// --- FALTAS / FREQUENCIA ---
 app.get('/api/faltas/turmas/:id/alunos', autenticar, async (req,res)=>{
   const turmaId = req.params.id;
   const data = req.query.data || new Date().toISOString().slice(0,10);
   try {
-    // FIX DISTINCT - não usar JOIN com turmas_disciplinas que duplica
     const r = await pool.query(`
       SELECT DISTINCT a.id, a.nome, a.matricula,
              (SELECT json_agg(json_build_object('id', r.id, 'nome', r.nome, 'telefone', r.telefone)
@@ -485,7 +520,6 @@ app.get('/api/faltas/turmas/:id/alunos', autenticar, async (req,res)=>{
       WHERE a.ativo IS NULL OR a.ativo=true
       ORDER BY a.nome
     `, [turmaId, data]);
-    // Normaliza presente
     const alunos = r.rows.map(row=>({ ...row, presente: row.presente !== false, detalhes: row.detalhes||'', responsaveis: row.responsaveis||[] }));
     res.json(alunos);
   } catch(e){
@@ -507,7 +541,6 @@ app.post('/api/faltas/chamada', autenticar, async (req,res)=>{
 app.get('/api/faltas/aluno/:id', autenticar, async (req,res)=>{
   const r = await pool.query(`SELECT f.*, t.nome as turma, d.nome as disciplina, p.nome as professor FROM frequencias f LEFT JOIN turmas_disciplinas td ON td.id=f.turma_disciplina_id LEFT JOIN turmas t ON t.id=td.turma_id LEFT JOIN disciplinas d ON d.id=td.disciplina_id LEFT JOIN professores p ON p.id=td.professor_id WHERE f.aluno_id=$1 AND f.presente=false ORDER BY f.data DESC`, [req.params.id]);
   const total = r.rows.length;
-  // justificativas
   for (const row of r.rows) {
     const j = await pool.query('SELECT id, nome_original FROM justificativas WHERE falta_id=$1', [row.id]);
     row.justificativas = j.rows;
@@ -515,18 +548,19 @@ app.get('/api/faltas/aluno/:id', autenticar, async (req,res)=>{
   res.json({ total, faltas: r.rows });
 });
 
-// --- PERFIL FOTO ---
+// --- PERFIL FOTO (foto do próprio usuário logado) ---
 app.get('/api/perfil/foto', autenticar, async (req,res)=>{
-  // Retorna placeholder - implementar storage real se quiser
   const u = await pool.query('SELECT foto_url FROM usuarios WHERE id=$1', [req.usuario.id]);
   if (!u.rows[0]?.foto_url) return res.status(404).json({ erro:'Foto do perfil não encontrada.' });
   res.json({ foto_url: u.rows[0].foto_url });
 });
 app.put('/api/perfil/foto', autenticar, async (req,res)=>{
   try {
-    const { imagem } = req.body;
-    await pool.query('UPDATE usuarios SET foto_url=$1 WHERE id=$2', [imagem, req.usuario.id]);
-    res.json({ mensagem:'Foto do perfil atualizada', foto_url: imagem });
+    const { imagem, foto_url } = req.body;
+    const foto = imagem || foto_url;
+    if (!foto) return res.status(400).json({ erro: 'Nenhuma imagem enviada' });
+    await pool.query('UPDATE usuarios SET foto_url=$1 WHERE id=$2', [foto, req.usuario.id]);
+    res.json({ mensagem:'Foto do perfil atualizada', foto_url: foto });
   } catch(e) {
     console.error('[PUT /perfil/foto]', e);
     res.status(400).json({ erro: e.message });
@@ -562,7 +596,6 @@ app.delete('/api/usuarios/:id', autenticar, async (req,res)=>{
 
 // JUSTIFICATIVAS
 app.post('/api/faltas/:id/justificativas', autenticar, async (req,res)=>{
-  // Simplificado - salva sem arquivo real
   await pool.query('INSERT INTO justificativas (falta_id, nome_original, mime_type) VALUES ($1,$2,$3)', [req.params.id, decodeURIComponent(req.headers['x-file-name']||'justificativa.pdf'), 'application/pdf']);
   res.json({ mensagem:'Justificativa enviada' });
 });
