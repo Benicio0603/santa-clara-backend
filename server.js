@@ -579,8 +579,32 @@ app.put('/api/perfil/foto', autenticar, async (req,res)=>{
   }
 });
 
+
+// Atalho: mesma troca de foto, mas pela rota do responsável (evita 404 se o front chamar assim)
+app.put('/api/responsavel/filhos/:id/foto', autenticar, async (req,res)=>{
+  req.params.id = req.params.id;
+  // reutiliza a lógica: redireciona internamente para a rota de aluno
+  try {
+    const { imagem, foto_url } = req.body;
+    const foto = imagem || foto_url;
+    if (!foto) return res.status(400).json({ erro: 'Nenhuma imagem enviada' });
+    if (req.usuario.perfil === 'responsavel') {
+      const check = await pool.query(`SELECT 1 FROM aluno_responsavel ar JOIN responsaveis r ON r.id=ar.responsavel_id WHERE ar.aluno_id=$1 AND r.usuario_id=$2`, [req.params.id, req.usuario.id]);
+      if (check.rows.length===0) return res.status(403).json({ erro: 'Sem permissão para este aluno' });
+    }
+    await pool.query('UPDATE alunos SET foto_url=$1 WHERE id=$2', [foto, req.params.id]);
+    res.json({ mensagem:'Foto salva', foto_url: foto });
+  } catch(e){ res.status(400).json({ erro:e.message }); }
+});
+app.get('/api/responsavel/filhos/:id/foto', autenticar, async (req,res)=>{
+  const r = await pool.query('SELECT foto_url FROM alunos WHERE id=$1', [req.params.id]);
+  const foto = r.rows[0]?.foto_url;
+  if (!foto || foto==='foto_existe') return res.status(404).json({ erro:'Foto não encontrada' });
+  res.json({ foto_url: foto });
+});
+
 // --- RESPONSAVEL / FILHOS ---
-// --- RESPONSAVEL / FILHOS - CORRIGIDO: turma vem da matrícula ATIVA ---
+: turma vem da matrícula ATIVA ---
 // Antes: JOIN com matriculas podia trazer 2 turmas (ex: 9º A e 6º B) e o front pegava a primeira aleatória
 // Agora: subquery pega SÓ a matrícula ativa mais recente por aluno
 app.get('/api/responsavel/filhos', autenticar, async (req,res)=>{
@@ -688,6 +712,23 @@ app.put('/api/notas/:id', autenticar, async (req,res)=>{
 app.delete('/api/notas/:id', autenticar, async (req,res)=>{
   await pool.query('DELETE FROM notas WHERE id=$1', [req.params.id]);
   res.json({ mensagem: 'Nota excluída' });
+});
+
+// Atalhos de notas para o perfil do responsável (evita "Rota GET /api/notas não encontrada" em qualquer variação)
+app.get('/api/responsavel/notas', autenticar, async (req,res)=>{
+  const aluno_id = req.query.aluno_id;
+  if (!aluno_id) return res.json([]);
+  const r = await pool.query(`SELECT n.*, d.nome as disciplina FROM notas n LEFT JOIN disciplinas d ON d.id=n.disciplina_id WHERE n.aluno_id=$1 ORDER BY d.nome, n.bimestre`, [aluno_id]);
+  res.json(r.rows);
+});
+app.get('/api/responsavel/filhos/:id/notas', autenticar, async (req,res)=>{
+  const r = await pool.query(`SELECT n.*, d.nome as disciplina FROM notas n LEFT JOIN disciplinas d ON d.id=n.disciplina_id WHERE n.aluno_id=$1 ORDER BY d.nome, n.bimestre`, [req.params.id]);
+  const geral = await pool.query(`SELECT AVG(valor) as media_geral FROM notas WHERE aluno_id=$1`, [req.params.id]);
+  res.json({ media_geral: geral.rows[0]?.media_geral || null, notas: r.rows });
+});
+app.get('/api/alunos/:id/notas', autenticar, async (req,res)=>{
+  const r = await pool.query(`SELECT n.*, d.nome as disciplina FROM notas n LEFT JOIN disciplinas d ON d.id=n.disciplina_id WHERE n.aluno_id=$1 ORDER BY d.nome, n.bimestre`, [req.params.id]);
+  res.json(r.rows);
 });
 
 // --- AVISOS ---
